@@ -96,6 +96,12 @@ func TestStoreBackedHandlers(t *testing.T) {
 	}
 	alpha := seedCharacter(t, ctx, stores, guild.ID, "Alpha", "Mage", now)
 	_ = seedCharacter(t, ctx, stores, guild.ID, "Beta", "Rogue", now)
+	_ = seedCharacter(t, ctx, stores, guild.ID, "Gamma", "Warrior", now)
+	otherGuild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "other", Name: "Other", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", now)
 	if err := stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
 		CharacterID:   alpha.ID,
 		Season:        "Season 1",
@@ -163,11 +169,11 @@ func TestStoreBackedHandlers(t *testing.T) {
 		if r.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
-		body := decodeBody(t, r)
-		if len(body.([]any)) != 2 {
+		body := decodeBody(t, r).(map[string]any)
+		if body["total"] != float64(3) || len(body["items"].([]any)) != 3 {
 			t.Fatalf("roster=%v", body)
 		}
-		alphaJSON := body.([]any)[0].(map[string]any)
+		alphaJSON := body["items"].([]any)[0].(map[string]any)
 		if alphaJSON["mythicRating"] != float64(2500) || alphaJSON["bestKeyLevel"] != float64(12) {
 			t.Fatalf("roster=%v", alphaJSON)
 		}
@@ -200,7 +206,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
 		body := decodeBody(t, r).(map[string]any)
-		if body["rosterSize"] != float64(2) || len(body["classDistribution"].([]any)) == 0 || body["lastSync"] == nil {
+		if body["rosterSize"] != float64(3) || len(body["classDistribution"].([]any)) == 0 || body["lastSync"] == nil {
 			t.Fatalf("dashboard=%v", body)
 		}
 	})
@@ -210,11 +216,23 @@ func TestStoreBackedHandlers(t *testing.T) {
 			if r.Code != http.StatusOK {
 				t.Fatalf("path=%s status=%d body=%s", path, r.Code, r.Body.String())
 			}
-			body := decodeBody(t, r).([]any)
-			if len(body) != 1 || body[0].(map[string]any)["name"] != "Alpha" {
+			body := decodeBody(t, r).(map[string]any)
+			items := body["items"].([]any)
+			if body["total"] != float64(1) || len(items) != 1 || items[0].(map[string]any)["name"] != "Alpha" {
 				t.Fatalf("path=%s roster=%v", path, body)
 			}
 		}
+		r := request(h, http.MethodGet, "/api/roster?sort=classSpec&direction=descending&page=1&pageSize=1", member)
+		body := decodeBody(t, r).(map[string]any)
+		items := body["items"].([]any)
+		if body["total"] != float64(3) || body["page"] != float64(1) || len(items) != 1 || items[0].(map[string]any)["name"] != "Gamma" {
+			t.Fatalf("paginated roster=%v", body)
+		}
+		classes := body["classes"].([]any)
+		if len(classes) != 3 || classes[0] != "Mage" || classes[1] != "Rogue" || classes[2] != "Warrior" {
+			t.Fatalf("roster classes=%v", classes)
+		}
+		assertStatus(t, h, http.MethodGet, "/api/roster?sort=drop%20table", member, http.StatusBadRequest)
 	})
 	t.Run("character detail and unknown character", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/characters/"+intString(alpha.ID), "", http.StatusUnauthorized)
@@ -225,6 +243,10 @@ func TestStoreBackedHandlers(t *testing.T) {
 			len(body["raidProgression"].([]any)) == 0 ||
 			len(body["snapshots"].([]any)) == 0 {
 			t.Fatalf("status=%d character=%v", r.Code, body)
+		}
+		byName := request(h, http.MethodGet, "/api/characters/Alpha", member)
+		if byName.Code != http.StatusOK || decodeBody(t, byName).(map[string]any)["id"] != float64(alpha.ID) {
+			t.Fatalf("named character=%d %s", byName.Code, byName.Body.String())
 		}
 		assertStatus(t, h, http.MethodGet, "/api/characters/999999", member, http.StatusNotFound)
 	})

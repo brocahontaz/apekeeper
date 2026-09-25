@@ -23,6 +23,13 @@ export type Character = {
   stale: boolean;
   [key: string]: unknown;
 };
+export type RosterPage = {
+  items: Character[];
+  total: number;
+  page: number;
+  pageSize: number;
+  classes: string[];
+};
 export type SyncRun = {
   id: number;
   guildId: number;
@@ -84,8 +91,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export const client = {
   me: () => api<User>("/api/auth/me"),
   dashboard: () => api<Dashboard>("/api/dashboard"),
-  roster: (q = "") => api<Character[]>(`/api/roster${q}`),
-  character: (id: string) => api<Character>(`/api/characters/${id}`),
+  roster: (q = "") => api<RosterPage>(`/api/roster${q}`),
+  character: (name: string) => api<Character>(`/api/characters/${encodeURIComponent(name)}`),
   runs: () => api<SyncRun[]>("/api/sync/runs"),
   sync: () => api<{ runId: number }>("/api/sync/run", { method: "POST" }),
   logout: () => api<void>("/api/auth/logout", { method: "POST" }),

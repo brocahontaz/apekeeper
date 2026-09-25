@@ -13,7 +13,7 @@
   const routes: Route[] = [
     { path: "/", component: Dashboard },
     { path: "/roster", component: Roster },
-    { path: "/characters/{id}", component: CharacterDetail },
+    { path: "/characters/{name}", component: CharacterDetail },
     { path: "/sync", component: Sync },
     { path: "/login", component: Login },
   ];
@@ -61,15 +61,15 @@
                   ? "Guild Master"
                   : $currentUser.appRole === "officer"
                     ? "Officer"
-                    : "Member"}</b
+                    : "Ape"}</b
             > <button onclick={logout}>Logout</button></span
           >{/if}
       </header>
       {#if active?.route.path === "/"}<Dashboard
         />{:else if active?.route.path === "/roster"}<Roster
         />{:else if active?.route.path === "/sync"}<Sync
-        />{:else if active?.route.path === "/characters/{id}"}<CharacterDetail
-          id={active.params.id}
+        />{:else if active?.route.path === "/characters/{name}"}<CharacterDetail
+          name={active.params.name}
         />{:else}<NotFound />{/if}
     </main>
   </div>{/if}
