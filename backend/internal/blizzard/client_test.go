@@ -1,8 +1,10 @@
 package blizzard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -49,6 +51,44 @@ func TestRequestRetries429(t *testing.T) {
 	}
 	if attempts != 2 || out.OK != "yes" {
 		t.Fatalf("attempts=%d output=%q", attempts, out.OK)
+	}
+}
+
+func TestRequestLogsFailedAttemptsAtDebug(t *testing.T) {
+	attempts := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "yes"})
+	}))
+	defer s.Close()
+	var buf bytes.Buffer
+	c := NewClient("us", "en_US", "", "", "")
+	defer c.limiter.Close()
+	c.Log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var out struct {
+		OK string `json:"ok"`
+	}
+	// The URL carries a query value that must never reach the log.
+	u := s.URL + "/data/wow/guild/x/y/roster?secret=do-not-log"
+	if err := c.request(context.Background(), http.MethodGet, u, "", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d", attempts)
+	}
+	if !strings.Contains(buf.String(), `"level":"DEBUG"`) ||
+		!strings.Contains(buf.String(), "blizzard request failed") {
+		t.Errorf("missing failed attempt log: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"path":"/data/wow/guild/x/y/roster"`) {
+		t.Errorf("failure log missing URL path only: %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "do-not-log") {
+		t.Errorf("failure log leaked the query string: %q", buf.String())
 	}
 }
 

@@ -11,18 +11,21 @@ import (
 type UserStore struct{ pool *pgxpool.Pool }
 
 // UpsertBattleNetUser assigns the first user administrator access as a bootstrap
-// rule. Guild-rank to application-role mapping deliberately belongs to future work.
+// rule and grants the platform-level superadmin role when requested. It never
+// demotes an existing role. Guild-rank to application-role mapping deliberately
+// belongs to future work.
 func (s UserStore) UpsertBattleNetUser(
 	ctx context.Context,
 	bnetID, battletag, accessToken, refreshToken string,
 	expiresAt time.Time,
+	superadmin bool,
 ) (domain.User, error) {
 	var u domain.User
 	err := s.pool.QueryRow(ctx, `WITH existing AS (
 		SELECT u.id FROM users u JOIN battle_net_identities i ON i.user_id=u.id WHERE i.bnet_id=$1
 	), inserted AS (
 		INSERT INTO users(display_name,app_role)
-		SELECT $2, CASE WHEN NOT EXISTS (SELECT 1 FROM users) THEN 'admin' ELSE 'member' END
+		SELECT $2, CASE WHEN $6 THEN 'superadmin' WHEN NOT EXISTS (SELECT 1 FROM users) THEN 'admin' ELSE 'member' END
 		WHERE NOT EXISTS (SELECT 1 FROM existing) RETURNING id,display_name,app_role
 	), selected AS (
 		SELECT u.id,u.display_name,u.app_role
@@ -39,10 +42,16 @@ func (s UserStore) UpsertBattleNetUser(
 		refresh_token=EXCLUDED.refresh_token,
 		token_expires_at=EXCLUDED.token_expires_at,
 		updated_at=now()
-	RETURNING user_id`, bnetID, battletag, accessToken, refreshToken, expiresAt).
+	RETURNING user_id`, bnetID, battletag, accessToken, refreshToken, expiresAt, superadmin).
 		Scan(&u.ID)
 	if err != nil {
 		return u, err
+	}
+	if superadmin {
+		if _, err = s.pool.Exec(ctx,
+			`UPDATE users SET app_role='superadmin' WHERE id=$1 AND app_role<>'superadmin'`, u.ID); err != nil {
+			return u, err
+		}
 	}
 	err = s.pool.QueryRow(ctx, `SELECT u.id,u.display_name,u.app_role FROM users u WHERE u.id=$1`, u.ID).
 		Scan(&u.ID, &u.DisplayName, &u.Role)

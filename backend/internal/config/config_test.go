@@ -19,6 +19,7 @@ var configVariables = []string{
 	"SYNC_SCHEDULE",
 	"OAUTH_REDIRECT_URL",
 	"SESSION_SECRET",
+	"SUPER_ADMIN_BATTLETAGS",
 	"STATIC_DIR",
 }
 
@@ -145,4 +146,48 @@ func TestLoadRejectsInvalidScheduleAndPort(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadRejectsInvalidLogLevel(t *testing.T) {
+	values := validConfigEnv()
+	values["LOG_LEVEL"] = "not-a-level"
+	setConfigEnv(t, values)
+
+	_, err := Load()
+	if err == nil || !strings.HasPrefix(err.Error(), "LOG_LEVEL:") {
+		t.Errorf("Load() error = %v, want error starting with %q", err, "LOG_LEVEL:")
+	}
+}
+
+func TestLoadParsesSuperAdminBattleTags(t *testing.T) {
+	t.Run("empty env means nobody", func(t *testing.T) {
+		setConfigEnv(t, validConfigEnv())
+
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if c.SuperAdminBattleTags != nil {
+			t.Errorf("SuperAdminBattleTags = %q, want nil", c.SuperAdminBattleTags)
+		}
+	})
+	t.Run("comma separated tags are trimmed and empties dropped", func(t *testing.T) {
+		values := validConfigEnv()
+		values["SUPER_ADMIN_BATTLETAGS"] = "a#1, b#2 ,,"
+		setConfigEnv(t, values)
+
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		want := []string{"a#1", "b#2"}
+		if len(c.SuperAdminBattleTags) != len(want) {
+			t.Fatalf("SuperAdminBattleTags = %q, want %q", c.SuperAdminBattleTags, want)
+		}
+		for i, tag := range want {
+			if c.SuperAdminBattleTags[i] != tag {
+				t.Errorf("SuperAdminBattleTags[%d] = %q, want %q", i, c.SuperAdminBattleTags[i], tag)
+			}
+		}
+	})
 }

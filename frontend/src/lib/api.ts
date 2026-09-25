@@ -4,7 +4,7 @@ export type User = {
   id: number;
   displayName: string;
   battletag: string;
-  appRole: "admin" | "officer" | "member";
+  appRole: "superadmin" | "admin" | "officer" | "member";
 };
 export type Character = {
   id: number;

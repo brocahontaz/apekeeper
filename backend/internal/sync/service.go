@@ -2,16 +2,22 @@ package sync
 
 import (
 	"context"
+	"log/slog"
+	"sync"
+	"time"
+
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
-	"sync"
 )
 
 type Service struct {
-	Engine  Engine
-	Guild   domain.Guild
+	Engine Engine
+	Guild  domain.Guild
+	// Log is optional; when nil the service stays silent.
+	Log     *slog.Logger
 	mu      sync.Mutex
 	running bool
+	started time.Time
 	last    store.SyncRun
 }
 
@@ -49,8 +55,13 @@ func (s *Service) begin(ctx context.Context, trigger string) (store.SyncRun, err
 	r, e := s.Engine.Stores.SyncRuns.Create(ctx, s.Guild.ID, trigger)
 	if e != nil {
 		s.running = false
+	} else {
+		s.started = time.Now()
 	}
 	s.mu.Unlock()
+	if e == nil && s.Log != nil {
+		s.Log.Info("sync run started", "runId", r.ID, "guild", s.Guild.Slug, "trigger", trigger)
+	}
 	return r, e
 }
 
@@ -58,7 +69,20 @@ func (s *Service) complete(r store.SyncRun) {
 	s.mu.Lock()
 	s.running = false
 	s.last = r
+	started := s.started
 	s.mu.Unlock()
+	// Single completion log covering both the synchronous and the manual
+	// asynchronous paths.
+	if s.Log != nil {
+		s.Log.Info("sync run completed",
+			"runId", r.ID,
+			"status", string(r.Status),
+			"total", r.Total,
+			"updated", r.Updated,
+			"failed", r.Failed,
+			"duration", time.Since(started).String(),
+		)
+	}
 }
 
 var ErrAlreadyRunning = &runningError{}

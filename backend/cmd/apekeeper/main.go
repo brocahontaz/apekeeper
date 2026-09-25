@@ -73,18 +73,25 @@ func main() {
 		cfg.BlizzardClientSecret,
 		cfg.OAuthRedirectURL,
 	)
+	client.Log = logg
 	service := &appsync.Service{
 		Engine: appsync.Engine{
 			Client: client,
 			Stores: stores,
+			Log:    logg,
 		},
 		Guild: guild,
+		Log:   logg,
 	}
 	scheduler := sched.New(cfg.SyncSchedule, logg)
 	go scheduler.Run(ctx, func(c context.Context) {
-		_, _ = service.Start(c, "scheduled")
+		if _, err := service.Start(c, "scheduled"); err != nil {
+			logg.Warn("scheduled sync failed", "error", err)
+		}
 	})
 	manager := auth.New(client, stores.Users, cfg.OAuthRedirectURL, []byte(cfg.SessionSecret))
+	manager.Log = logg
+	manager.SuperAdminBattleTags = cfg.SuperAdminBattleTags
 	trigger := httpapi.TriggerFunc(func(c context.Context) (int64, error) {
 		r, e := service.StartManual(c)
 		return r.ID, e

@@ -21,7 +21,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-apekeeper}:${POSTGRES_PASSWORD:-apekeeper}@db:5432/${POSTGRES_DB:-apekeeper}?sslmode=disable
       GUILD_REALM: ${GUILD_REALM:-}
-      OAUTH_REDIRECT_URL: http://localhost:8080/api/auth/callback
+      OAUTH_REDIRECT_URL: http://localhost:5173/api/auth/callback
     command: ["sh", "-c", "./apekeeper -migrate && exec ./apekeeper"]
     ports: ["8080:8080"]
     depends_on:

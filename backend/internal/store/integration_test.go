@@ -74,3 +74,57 @@ func TestListByGuildReturnsEachCharacterOnceAcrossMythicSeasons(t *testing.T) {
 		t.Fatalf("unfiltered rows=%+v err=%v", rows, err)
 	}
 }
+
+func TestUpsertBattleNetUserAssignsRoles(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	expires := time.Now().Add(time.Hour)
+	upsert := func(bnetID, battletag string, superadmin bool) domain.User {
+		t.Helper()
+		u, err := s.Users.UpsertBattleNetUser(ctx, bnetID, battletag, "", "", expires, superadmin)
+		if err != nil {
+			t.Fatalf("UpsertBattleNetUser(%s) error = %v", battletag, err)
+		}
+		return u
+	}
+
+	first := upsert("1", "First#1", false)
+	if first.Role != "admin" {
+		t.Fatalf("first user role = %q, want admin", first.Role)
+	}
+	second := upsert("2", "Second#2", false)
+	if second.Role != "member" {
+		t.Fatalf("second user role = %q, want member", second.Role)
+	}
+	super := upsert("3", "Super#3", true)
+	if super.Role != "superadmin" {
+		t.Fatalf("flagged new user role = %q, want superadmin", super.Role)
+	}
+	promoted := upsert("1", "First#1", true)
+	if promoted.ID != first.ID || promoted.Role != "superadmin" {
+		t.Fatalf("flagged existing user = %+v, want upgraded superadmin", promoted)
+	}
+	staysMember := upsert("2", "Second#2", false)
+	if staysMember.ID != second.ID || staysMember.Role != "member" {
+		t.Fatalf("unflagged member = %+v, want untouched member", staysMember)
+	}
+	keepsRole := upsert("3", "Super#3", false)
+	if keepsRole.ID != super.ID || keepsRole.Role != "superadmin" {
+		t.Fatalf("unflagged superadmin = %+v, want untouched superadmin", keepsRole)
+	}
+}
+
+func TestUpsertBattleNetUserFirstSuperAdminPrecedesBootstrapAdmin(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	u, err := s.Users.UpsertBattleNetUser(
+		ctx, "1", "Owner#2576", "", "", time.Now().Add(time.Hour), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Role != "superadmin" {
+		t.Fatalf("first flagged user role = %q, want superadmin", u.Role)
+	}
+}

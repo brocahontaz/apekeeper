@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -23,6 +24,7 @@ type Config struct {
 	SyncSchedule         string
 	OAuthRedirectURL     string
 	SessionSecret        string
+	SuperAdminBattleTags []string
 	StaticDir            string
 }
 
@@ -41,6 +43,7 @@ func Load() (Config, error) {
 		SyncSchedule:         env("SYNC_SCHEDULE", "03:00"),
 		OAuthRedirectURL:     os.Getenv("OAUTH_REDIRECT_URL"),
 		SessionSecret:        os.Getenv("SESSION_SECRET"),
+		SuperAdminBattleTags: parseBattleTags(os.Getenv("SUPER_ADMIN_BATTLETAGS")),
 		StaticDir:            os.Getenv("STATIC_DIR"),
 	}
 
@@ -79,6 +82,10 @@ func Load() (Config, error) {
 	if _, err := strconv.Atoi(c.ServerPort); err != nil {
 		return c, fmt.Errorf("SERVER_PORT: %w", err)
 	}
+	var logLevel slog.Level
+	if err := logLevel.UnmarshalText([]byte(c.LogLevel)); err != nil {
+		return c, fmt.Errorf("LOG_LEVEL: %w", err)
+	}
 	return c, nil
 }
 
@@ -101,4 +108,19 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// parseBattleTags splits a comma-separated BattleTag list, trimming spaces and
+// dropping empty entries; an empty list means nobody is a super admin.
+func parseBattleTags(value string) []string {
+	tags := make([]string, 0, strings.Count(value, ",")+1)
+	for _, part := range strings.Split(value, ",") {
+		if tag := strings.TrimSpace(part); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	return tags
 }
