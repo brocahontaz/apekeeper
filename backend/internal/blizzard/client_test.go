@@ -103,6 +103,30 @@ func TestProfileDTOFixture(t *testing.T) {
 	}
 }
 
+func TestGuildRosterUsesProfileNamespace(t *testing.T) {
+	var gotNamespace string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "test-token", ExpiresIn: 120})
+			return
+		}
+		gotNamespace = r.URL.Query().Get("namespace")
+		_ = json.NewEncoder(w).Encode(dto.GuildRoster{})
+	}))
+	defer s.Close()
+	c := NewClient("eu", "en_GB", "", "", "")
+	defer c.limiter.Close()
+	c.APIBase = s.URL
+	c.OAuthBase = s.URL
+
+	if _, err := c.GuildRoster(context.Background(), "Tarren Mill", "Ape Enclosure"); err != nil {
+		t.Fatal(err)
+	}
+	if gotNamespace != "profile-eu" {
+		t.Fatalf("namespace=%q, want profile-eu", gotNamespace)
+	}
+}
+
 func TestTokenCacheReusesValidToken(t *testing.T) {
 	calls := 0
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

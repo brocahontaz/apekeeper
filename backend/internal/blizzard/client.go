@@ -143,7 +143,7 @@ func (c *Client) GuildRoster(ctx context.Context, realm, guild string) (dto.Guil
 	var x dto.GuildRoster
 	return x, c.get(ctx,
 		"/data/wow/guild/"+RealmSlug(realm)+"/"+Slug(guild)+"/roster",
-		DynamicNamespace(c.Region),
+		ProfileNamespace(c.Region),
 		&x,
 	)
 }
