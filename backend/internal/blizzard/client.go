@@ -167,7 +167,7 @@ func (c *Client) CharacterMythicPlusSeasonal(ctx context.Context, realm, name, s
 	var x dto.MythicPlus
 	return x, c.get(ctx,
 		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/mythic-keystone-profile/season/"+season,
-		DynamicNamespace(c.Region),
+		ProfileNamespace(c.Region),
 		&x,
 	)
 }
@@ -175,7 +175,7 @@ func (c *Client) CharacterRaids(ctx context.Context, realm, name string) (dto.Ra
 	var x dto.Raids
 	return x, c.get(ctx,
 		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/encounters/raids",
-		DynamicNamespace(c.Region),
+		ProfileNamespace(c.Region),
 		&x,
 	)
 }
