@@ -37,7 +37,7 @@
     <section>
       <h2>M+ Vanguard</h2>
       <table>
-        <thead><tr><th>Keeper</th><th>Rating</th><th>Best</th></tr></thead><tbody
+        <thead><tr><th>Ape</th><th>Rating</th><th>Best</th></tr></thead><tbody
           >{#each data.mythicPlus.top as row}<tr
               ><td>{row.name} <small>{row.realm}</small></td><td>{number(row.rating)}</td><td
                 >+{row.bestKey}</td
@@ -47,7 +47,7 @@
       </table>
     </section>
     <section>
-      <h2>Keeper's Watch · {data.staleCharacters.count}</h2>
+      <h2>Ape Watch · {data.staleCharacters.count}</h2>
       {#each data.staleCharacters.characters as row}<p>
           {row.name}
           <span class="stale">{row.syncedAt ? `${row.stalenessDays}d ago` : "never synced"}</span>

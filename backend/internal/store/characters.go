@@ -24,6 +24,54 @@ type CharacterDetail struct {
 	Raids     []domain.RaidProgression
 	Snapshots []domain.Snapshot
 }
+type CharacterPage struct {
+	Items []domain.Character
+	Total int
+}
+type CharacterSort string
+
+const (
+	CharacterSortName         CharacterSort = "name"
+	CharacterSortLevel        CharacterSort = "level"
+	CharacterSortItemLevel    CharacterSort = "itemLevel"
+	CharacterSortGuildRank    CharacterSort = "guildRank"
+	CharacterSortRealm        CharacterSort = "realm"
+	CharacterSortClassSpec    CharacterSort = "classSpec"
+	CharacterSortMythicRating CharacterSort = "mythicRating"
+	CharacterSortSyncedAt     CharacterSort = "syncedAt"
+)
+
+func ParseCharacterSort(v string) (CharacterSort, bool) {
+	sort := CharacterSort(v)
+	switch sort {
+	case CharacterSortName, CharacterSortLevel, CharacterSortItemLevel, CharacterSortGuildRank,
+		CharacterSortRealm, CharacterSortClassSpec, CharacterSortMythicRating, CharacterSortSyncedAt:
+		return sort, true
+	default:
+		return CharacterSortName, false
+	}
+}
+
+func (s CharacterSort) SQL() string {
+	switch s {
+	case CharacterSortLevel:
+		return "COALESCE(c.level,0)"
+	case CharacterSortItemLevel:
+		return "COALESCE(c.item_level,0)"
+	case CharacterSortGuildRank:
+		return "COALESCE(c.guild_rank,0)"
+	case CharacterSortRealm:
+		return "c.realm"
+	case CharacterSortClassSpec:
+		return "(COALESCE(c.class_name,'') || ' ' || COALESCE(c.spec_name,''))"
+	case CharacterSortMythicRating:
+		return "COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0)"
+	case CharacterSortSyncedAt:
+		return "COALESCE(c.synced_at,'epoch')"
+	default:
+		return "c.display_name"
+	}
+}
 
 func (s CharacterStore) UpsertByGuildIdentity(
 	ctx context.Context,
@@ -151,7 +199,43 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 	return d, rows.Err()
 }
 
+// DetailByName resolves a URL-safe display name within its guild before
+// loading the same complete profile as the legacy numeric-ID lookup.
+func (s CharacterStore) DetailByName(ctx context.Context, guildID int64, name string, since time.Time) (CharacterDetail, error) {
+	var id int64
+	if err := s.pool.QueryRow(ctx, `SELECT id FROM characters WHERE guild_id=$1 AND normalized_name=$2`, guildID, domain.NormalizeCharacterName(name)).Scan(&id); err != nil {
+		return CharacterDetail{}, err
+	}
+	return s.Detail(ctx, guildID, id, since)
+}
+
 func (s CharacterStore) ListByGuild(ctx context.Context, guildID int64, f CharacterFilter) ([]domain.Character, error) {
+	page, err := s.listByGuild(ctx, guildID, f, 0, 0, CharacterSortName, false)
+	return page.Items, err
+}
+
+func (s CharacterStore) ListPageByGuild(ctx context.Context, guildID int64, f CharacterFilter, limit, offset int, sort CharacterSort, descending bool) (CharacterPage, error) {
+	return s.listByGuild(ctx, guildID, f, limit, offset, sort, descending)
+}
+
+func (s CharacterStore) ListClassesByGuild(ctx context.Context, guildID int64) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT class_name FROM characters WHERE guild_id=$1 AND COALESCE(class_name,'') <> '' ORDER BY class_name`, guildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	classes := []string{}
+	for rows.Next() {
+		var class string
+		if err := rows.Scan(&class); err != nil {
+			return nil, err
+		}
+		classes = append(classes, class)
+	}
+	return classes, rows.Err()
+}
+
+func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f CharacterFilter, limit, offset int, sort CharacterSort, descending bool) (CharacterPage, error) {
 	args := []any{guildID}
 	where := []string{"c.guild_id=$1"}
 	add := func(q string, v any) {
@@ -179,6 +263,11 @@ func (s CharacterStore) ListByGuild(ctx context.Context, guildID int64, f Charac
 	if f.StaleBefore != nil {
 		add("(c.synced_at IS NULL OR c.synced_at < $%d)", *f.StaleBefore)
 	}
+	whereClause := strings.Join(where, " AND ")
+	var total int
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM characters c WHERE "+whereClause, args...).Scan(&total); err != nil {
+		return CharacterPage{}, err
+	}
 	q := `SELECT
 		c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
 		COALESCE(c.class_id,0),COALESCE(c.class_name,''),
@@ -188,10 +277,20 @@ func (s CharacterStore) ListByGuild(ctx context.Context, guildID int64, f Charac
 		COALESCE((SELECT MAX(best_key_level) FROM mythic_plus m WHERE m.character_id=c.id),0),
 		COALESCE(c.synced_at,'epoch')
 		FROM characters c
-		WHERE ` + strings.Join(where, " AND ") + " ORDER BY c.display_name"
+		WHERE ` + whereClause + " ORDER BY " + sort.SQL()
+	if descending {
+		q += " DESC"
+	} else {
+		q += " ASC"
+	}
+	q += ", c.display_name ASC"
+	if limit > 0 {
+		args = append(args, limit, offset)
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	}
 	rows, e := s.pool.Query(ctx, q, args...)
 	if e != nil {
-		return nil, e
+		return CharacterPage{}, e
 	}
 	defer rows.Close()
 	out := []domain.Character{}
@@ -207,9 +306,9 @@ func (s CharacterStore) ListByGuild(ctx context.Context, guildID int64, f Charac
 			&c.MythicRating, &c.BestKeyLevel, &c.SyncedAt,
 		)
 		if e != nil {
-			return nil, e
+			return CharacterPage{}, e
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	return CharacterPage{Items: out, Total: total}, rows.Err()
 }

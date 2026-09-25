@@ -168,16 +168,41 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 		x := a.now().Add(-7 * 24 * time.Hour)
 		f.StaleBefore = &x
 	}
-	rows, e := a.Stores.Characters.ListByGuild(r.Context(), g.ID, f)
+	page, pageSize := 1, 25
+	if v, ok := integer(q.Get("page")); ok && v > 0 {
+		page = v
+	}
+	if v, ok := integer(q.Get("pageSize")); ok && v > 0 && v <= 100 {
+		pageSize = v
+	}
+	sort, ok := store.ParseCharacterSort(q.Get("sort"))
+	if q.Get("sort") == "" {
+		sort = store.CharacterSortName
+	}
+	if !ok && q.Get("sort") != "" {
+		fail(w, 400, "invalid roster sort")
+		return
+	}
+	descending := q.Get("direction") == "descending"
+	if direction := q.Get("direction"); direction != "" && direction != "ascending" && direction != "descending" {
+		fail(w, 400, "invalid roster sort direction")
+		return
+	}
+	result, e := a.Stores.Characters.ListPageByGuild(r.Context(), g.ID, f, pageSize, (page-1)*pageSize, sort, descending)
 	if e != nil {
 		fail(w, 500, "roster lookup failed")
 		return
 	}
-	out := make([]map[string]any, 0, len(rows))
-	for _, c := range rows {
+	classes, e := a.Stores.Characters.ListClassesByGuild(r.Context(), g.ID)
+	if e != nil {
+		fail(w, 500, "roster class lookup failed")
+		return
+	}
+	out := make([]map[string]any, 0, len(result.Items))
+	for _, c := range result.Items {
 		out = append(out, characterJSON(c, a.now()))
 	}
-	jsonOut(w, 200, out)
+	jsonOut(w, 200, map[string]any{"items": out, "total": result.Total, "page": page, "pageSize": pageSize, "classes": classes})
 }
 func integer(s string) (int, bool) {
 	v, e := strconv.Atoi(s)
@@ -207,12 +232,13 @@ func (a API) character(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "guild lookup failed")
 		return
 	}
-	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if e != nil {
-		fail(w, 400, "invalid character id")
-		return
+	identity := r.PathValue("id")
+	var d store.CharacterDetail
+	if id, parseErr := strconv.ParseInt(identity, 10, 64); parseErr == nil {
+		d, e = a.Stores.Characters.Detail(r.Context(), g.ID, id, a.now().Add(-30*24*time.Hour))
+	} else {
+		d, e = a.Stores.Characters.DetailByName(r.Context(), g.ID, identity, a.now().Add(-30*24*time.Hour))
 	}
-	d, e := a.Stores.Characters.Detail(r.Context(), g.ID, id, a.now().Add(-30*24*time.Hour))
 	if e != nil {
 		fail(w, 404, "character not found")
 		return
