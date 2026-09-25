@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apekeeper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apekeeper}
+      POSTGRES_DB: ${POSTGRES_DB:-apekeeper}
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-apekeeper}:${POSTGRES_PASSWORD:-apekeeper}@db:5432/${POSTGRES_DB:-apekeeper}?sslmode=disable
+      GUILD_REALM: ${GUILD_REALM:-}
+      OAUTH_REDIRECT_URL: http://localhost:8080/api/auth/callback
+    command: ["sh", "-c", "./apekeeper -migrate && exec ./apekeeper"]
+    ports: ["8080:8080"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8080
+    ports: ["5173:5173"]
+    depends_on:
+      - backend
+volumes:
+  postgres_data:

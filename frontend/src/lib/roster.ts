@@ -1,0 +1,1 @@
+import type { Character } from './api'; export type Filters={search?:string;class?:string;stale?:boolean}; export function filterRoster(rows:Character[], f:Filters){return rows.filter(r=>(!f.search||r.name.toLowerCase().includes(f.search.toLowerCase()))&&(!f.class||r.className===f.class)&&(!f.stale||r.stale));}

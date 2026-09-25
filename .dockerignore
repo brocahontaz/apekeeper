@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+*.log
+*.tmp
+*.swp
+.DS_Store

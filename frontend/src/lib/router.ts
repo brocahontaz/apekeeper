@@ -1,0 +1,4 @@
+export type Route = { path: string; component: unknown }; export type Match = { route: Route; params: Record<string,string>; query: URLSearchParams } | null;
+export function match(routes: Route[], url = location.pathname + location.search): Match { const u = new URL(url, 'http://local'); for (const route of routes) { const names: string[]=[]; const pattern='^'+route.path.replace(/\{([^}]+)\}/g, (_, n) => { names.push(n); return '([^/]+)'; })+'$'; const result=u.pathname.match(new RegExp(pattern)); if (result) return {route, params:Object.fromEntries(names.map((n,i)=>[n,decodeURIComponent(result[i+1])])),query:u.searchParams}; } return null; }
+export function navigate(to: string) { history.pushState({}, '', to); window.dispatchEvent(new PopStateEvent('popstate')); }
+export function link(to: string) { return { href: to, onclick: (event: MouseEvent) => { event.preventDefault(); navigate(to); } }; }
