@@ -9,7 +9,7 @@
   let stale = $state(new URLSearchParams(location.search).get("stale") === "true");
   let page = $state(Number(new URLSearchParams(location.search).get("page")) || 1);
   let sort = $state<RosterSort>(
-    (new URLSearchParams(location.search).get("sort") as RosterSort) || "name",
+    (new URLSearchParams(location.search).get("sort") as RosterSort) || "guildRank",
   );
   let direction = $state<RosterDirection>(
     new URLSearchParams(location.search).get("direction") === "descending"
@@ -44,7 +44,7 @@
     if (klass) q.set("class", klass);
     if (stale) q.set("stale", "true");
     if (page > 1) q.set("page", String(page));
-    if (sort !== "name") q.set("sort", sort);
+    if (sort !== "guildRank") q.set("sort", sort);
     if (direction !== "ascending") q.set("direction", direction);
     history.replaceState({}, "", `/roster?${q}`);
     load();

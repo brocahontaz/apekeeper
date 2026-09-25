@@ -3,11 +3,12 @@ package domain
 import "time"
 
 type Snapshot struct {
-	CharacterID             int64
-	CapturedAt              time.Time
-	ItemLevel, MythicRating float64
-	BestKeyLevel            int
-	RaidProgress            []byte
+	CharacterID  int64     `json:"characterId"`
+	CapturedAt   time.Time `json:"capturedAt"`
+	ItemLevel    float64   `json:"itemLevel"`
+	MythicRating float64   `json:"mythicRating"`
+	BestKeyLevel int       `json:"bestKeyLevel"`
+	RaidProgress []byte    `json:"-"`
 }
 
 func SnapshotChanged(prev, next Snapshot) bool {

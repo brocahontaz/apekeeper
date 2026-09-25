@@ -94,14 +94,14 @@ func TestStoreBackedHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alpha := seedCharacter(t, ctx, stores, guild.ID, "Alpha", "Mage", now)
-	_ = seedCharacter(t, ctx, stores, guild.ID, "Beta", "Rogue", now)
-	_ = seedCharacter(t, ctx, stores, guild.ID, "Gamma", "Warrior", now)
+	alpha := seedCharacter(t, ctx, stores, guild.ID, "Alpha", "Mage", "Arcane", now)
+	beta := seedCharacter(t, ctx, stores, guild.ID, "Beta", "Rogue", "Combat", now)
+	gamma := seedCharacter(t, ctx, stores, guild.ID, "Gamma", "Warrior", "Arms", now)
 	otherGuild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "other", Name: "Other", Realm: "Area 52", Region: "us"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", now)
+	_ = seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", "Arcane", now)
 	if err := stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
 		CharacterID:   alpha.ID,
 		Season:        "Season 1",
@@ -142,6 +142,9 @@ func TestStoreBackedHandlers(t *testing.T) {
 	run.Status = domain.RunSuccess
 	run.Updated = 7
 	if err := stores.SyncRuns.Finish(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Characters.UpdateAvatar(ctx, alpha.ID, "https://render.worldofwarcraft.com/us/alpha.jpg"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,8 +209,31 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
 		body := decodeBody(t, r).(map[string]any)
-		if body["rosterSize"] != float64(3) || len(body["classDistribution"].([]any)) == 0 || body["lastSync"] == nil {
+		if body["rosterSize"] != float64(3) || body["lastSync"] == nil {
 			t.Fatalf("dashboard=%v", body)
+		}
+		if _, ok := body["specDistribution"]; ok {
+			t.Fatalf("dashboard must not expose specDistribution: %v", body)
+		}
+		dist := body["classDistribution"].([]any)
+		wantClasses := []string{"Mage", "Rogue", "Warrior"}
+		wantSpecs := []string{"Arcane", "Combat", "Arms"}
+		if len(dist) != len(wantClasses) {
+			t.Fatalf("classDistribution=%v", dist)
+		}
+		for i, e := range dist {
+			entry := e.(map[string]any)
+			if entry["className"] != wantClasses[i] {
+				t.Fatalf("classDistribution[%d]=%v, want class %s", i, entry, wantClasses[i])
+			}
+			specs, ok := entry["specs"].([]any)
+			if !ok || len(specs) != 1 {
+				t.Fatalf("class %s specs=%v", entry["className"], entry["specs"])
+			}
+			spec := specs[0].(map[string]any)
+			if spec["name"] != wantSpecs[i] || spec["count"] != float64(1) {
+				t.Fatalf("class %s specs=%v, want %s", entry["className"], specs, wantSpecs[i])
+			}
 		}
 	})
 	t.Run("roster filters", func(t *testing.T) {
@@ -244,6 +270,25 @@ func TestStoreBackedHandlers(t *testing.T) {
 			len(body["snapshots"].([]any)) == 0 {
 			t.Fatalf("status=%d character=%v", r.Code, body)
 		}
+		if body["avatarUrl"] != "https://render.worldofwarcraft.com/us/alpha.jpg" {
+			t.Fatalf("avatarUrl=%v", body["avatarUrl"])
+		}
+		mythic := body["mythicPlus"].([]any)[0].(map[string]any)
+		if mythic["overallRating"] != float64(2500) || mythic["seasonSlug"] != "season-1" {
+			t.Fatalf("mythicPlus=%v", mythic)
+		}
+		raid := body["raidProgression"].([]any)[0].(map[string]any)
+		if raid["raidName"] != "Raid" || raid["difficulty"] != "heroic" ||
+			raid["progress"] != float64(4) || raid["totalBosses"] != float64(8) {
+			t.Fatalf("raidProgression=%v", raid)
+		}
+		snap := body["snapshots"].([]any)[0].(map[string]any)
+		if snap["itemLevel"] != float64(620) {
+			t.Fatalf("snapshots=%v", snap)
+		}
+		if _, ok := snap["capturedAt"].(string); !ok {
+			t.Fatalf("snapshots capturedAt=%v, want a string", snap["capturedAt"])
+		}
 		byName := request(h, http.MethodGet, "/api/characters/Alpha", member)
 		if byName.Code != http.StatusOK || decodeBody(t, byName).(map[string]any)["id"] != float64(alpha.ID) {
 			t.Fatalf("named character=%d %s", byName.Code, byName.Body.String())
@@ -261,6 +306,29 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("me=%v", body)
 		}
 	})
+	t.Run("roster defaults to guild rank order", func(t *testing.T) {
+		ranks := map[string]int{"Alpha": 1, "Beta": 0, "Gamma": 3}
+		for _, c := range []domain.Character{alpha, beta, gamma} {
+			c.GuildRank = ranks[c.DisplayName]
+			if _, err := stores.Characters.UpsertByGuildIdentity(ctx, c, []byte("{}")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r := request(h, http.MethodGet, "/api/roster", member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		body := decodeBody(t, r).(map[string]any)
+		if body["total"] != float64(3) {
+			t.Fatalf("roster=%v", body)
+		}
+		items := body["items"].([]any)
+		for i, want := range []string{"Beta", "Alpha", "Gamma"} {
+			if got := items[i].(map[string]any)["name"]; got != want {
+				t.Fatalf("roster[%d]=%v, want %v", i, got, want)
+			}
+		}
+	})
 }
 
 func seedCharacter(
@@ -268,7 +336,7 @@ func seedCharacter(
 	ctx context.Context,
 	stores store.Store,
 	guildID int64,
-	name, class string,
+	name, class, spec string,
 	now time.Time,
 ) domain.Character {
 	t.Helper()
@@ -283,7 +351,7 @@ func seedCharacter(
 		ClassID:        8,
 		ClassName:      class,
 		SpecID:         62,
-		SpecName:       "Arcane",
+		SpecName:       spec,
 		Level:          70,
 		ItemLevel:      620,
 		SyncedAt:       now,

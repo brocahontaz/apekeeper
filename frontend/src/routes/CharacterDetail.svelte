@@ -20,7 +20,13 @@
   >
     Opening ape file…
   </p>{:else}<header class="character">
-    <div class="avatar">{character.name[0]}</div>
+    <div class="avatar">
+      {#if character.avatarUrl}
+        <img src={character.avatarUrl} alt={character.name} />
+      {:else}
+        {character.name[0]}
+      {/if}
+    </div>
     <div>
       <h1 style={`color:${classColor(character.classId)}`}>{character.name}</h1>
       <div class="character-stats">
@@ -39,7 +45,7 @@
     <section>
       <h2>Mythic+ stats</h2>
       {#each (character.mythicPlus as any[]) ?? [] as m}<div class="progression-row">
-          <strong>{m.season}</strong><span
+          <strong>{m.season || "Current season"}</strong><span
             >Rating <b>{Math.round(m.overallRating).toLocaleString()}</b></span
           ><span>Best key <b>+{m.bestKeyLevel}</b></span>
         </div>{:else}<p>No keystones recorded.</p>{/each}

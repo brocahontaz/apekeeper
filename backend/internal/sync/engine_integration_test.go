@@ -2,7 +2,9 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -59,13 +61,18 @@ func (c *logCapture) attr(level slog.Level, msg, key string) (slog.Value, bool) 
 }
 
 type fakeClient struct {
+	mu                    sync.Mutex
 	rating, ilvl          float64
+	bestLevel             int
+	mediaURL              string
 	rosterErr, profileErr error
 	mythicErr, raidsErr   error
+	mediaErr              error
 	profileWait           <-chan struct{}
+	seasons               []string
 }
 
-func (f fakeClient) GuildRoster(context.Context, string, string) (dto.GuildRoster, error) {
+func (f *fakeClient) GuildRoster(context.Context, string, string) (dto.GuildRoster, error) {
 	if f.rosterErr != nil {
 		return dto.GuildRoster{}, f.rosterErr
 	}
@@ -79,14 +86,14 @@ func (f fakeClient) GuildRoster(context.Context, string, string) (dto.GuildRoste
 	}
 	return r, nil
 }
-func (f fakeClient) CharacterProfileSummary(_ context.Context, _, n string) (dto.ProfileSummary, error) {
+func (f *fakeClient) CharacterProfileSummary(_ context.Context, _, n string) (dto.ProfileSummary, error) {
 	if f.profileWait != nil {
 		<-f.profileWait
 	}
 	if f.profileErr != nil && n == "Two" {
 		return dto.ProfileSummary{}, f.profileErr
 	}
-	p := dto.ProfileSummary{Name: n, Level: 70}
+	p := dto.ProfileSummary{Name: n, Level: 70, EquippedItemLevel: f.ilvl}
 	p.Realm = dto.Name{Name: "Area 52", Slug: "area-52"}
 	p.CharacterClass.ID = 8
 	p.CharacterClass.Name = "Mage"
@@ -94,19 +101,25 @@ func (f fakeClient) CharacterProfileSummary(_ context.Context, _, n string) (dto
 	p.ActiveSpec.Name = "Arcane"
 	return p, nil
 }
-func (f fakeClient) CharacterEquipment(context.Context, string, string) (dto.Equipment, error) {
-	return dto.Equipment{EquippedItemLevel: f.ilvl}, nil
-}
-func (f fakeClient) CharacterMythicPlusSeasonal(_ context.Context, _, _, _ string) (dto.MythicPlus, error) {
+func (f *fakeClient) CharacterMythicPlusSeasonal(_ context.Context, _, _, season string) (dto.MythicPlus, error) {
+	f.mu.Lock()
+	f.seasons = append(f.seasons, season)
+	f.mu.Unlock()
 	if f.mythicErr != nil {
 		return dto.MythicPlus{}, f.mythicErr
 	}
 	var m dto.MythicPlus
-	m.CurrentMythicRating.Rating = f.rating
+	raw := fmt.Sprintf(
+		`{"current_mythic_rating":{"rating":%v},"best_runs":[{"mythic_level":%d}]}`,
+		f.rating, f.bestLevel,
+	)
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return dto.MythicPlus{}, err
+	}
 	return m, nil
 }
 
-func (f fakeClient) CharacterRaids(_ context.Context, _, n string) (dto.Raids, error) {
+func (f *fakeClient) CharacterRaids(_ context.Context, _, n string) (dto.Raids, error) {
 	var notFound *blizzard.NotFoundError
 	if f.raidsErr != nil && (errors.As(f.raidsErr, &notFound) || n == "Two") {
 		return dto.Raids{}, f.raidsErr
@@ -114,8 +127,19 @@ func (f fakeClient) CharacterRaids(_ context.Context, _, n string) (dto.Raids, e
 	return dto.Raids{}, nil
 }
 
+func (f *fakeClient) CharacterMedia(context.Context, string, string) (dto.CharacterMedia, error) {
+	if f.mediaErr != nil {
+		return dto.CharacterMedia{}, f.mediaErr
+	}
+	var m dto.CharacterMedia
+	if f.mediaURL != "" {
+		m.Assets = []dto.MediaAsset{{Key: "avatar", Value: f.mediaURL}}
+	}
+	return m, nil
+}
+
 func TestEngineCapturesProfileWhenProgressionIsNotFound(t *testing.T) {
-	e, s, g := testEngine(t, fakeClient{
+	e, s, g := testEngine(t, &fakeClient{
 		ilvl:      600,
 		mythicErr: &blizzard.NotFoundError{URL: "mythic"},
 		raidsErr:  &blizzard.NotFoundError{URL: "raids"},
@@ -138,7 +162,7 @@ func TestEngineCapturesProfileWhenProgressionIsNotFound(t *testing.T) {
 }
 
 func TestEngineCapturesProfileOnProgressionFailure(t *testing.T) {
-	e, s, g := testEngine(t, fakeClient{ilvl: 600, raidsErr: errors.New("raids unavailable")})
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600, raidsErr: errors.New("raids unavailable")})
 	r, err := e.RunGuildSync(context.Background(), g, "manual")
 	if err != nil || r.Status != domain.RunPartial || r.Updated != 1 || r.Failed != 1 {
 		t.Fatalf("run=%+v err=%v", r, err)
@@ -154,19 +178,19 @@ func TestEngineCapturesProfileOnProgressionFailure(t *testing.T) {
 		}
 	}
 }
-func (fakeClient) ExchangeCode(context.Context, string) (dto.Token, error) {
+func (*fakeClient) ExchangeCode(context.Context, string) (dto.Token, error) {
 	return dto.Token{}, nil
 }
-func (fakeClient) UserProfile(context.Context, string) (dto.UserProfile, error) {
+func (*fakeClient) UserProfile(context.Context, string) (dto.UserProfile, error) {
 	return dto.UserProfile{}, nil
 }
-func (fakeClient) AuthorizationURL(string, string) string {
+func (*fakeClient) AuthorizationURL(string, string) string {
 	return ""
 }
 
-var _ blizzard.BlizzardClient = fakeClient{}
+var _ blizzard.BlizzardClient = &fakeClient{}
 
-func testEngine(t *testing.T, f fakeClient) (Engine, store.Store, domain.Guild) {
+func testEngine(t *testing.T, f *fakeClient) (Engine, store.Store, domain.Guild) {
 	t.Helper()
 	p, _ := testdb.New(t)
 	s := store.New(p)
@@ -189,7 +213,7 @@ func testEngine(t *testing.T, f fakeClient) (Engine, store.Store, domain.Guild) 
 	}, s, g
 }
 func TestEnginePersistsSyncAndChangedSnapshots(t *testing.T) {
-	e, s, g := testEngine(t, fakeClient{rating: 100, ilvl: 600})
+	e, s, g := testEngine(t, &fakeClient{rating: 100, ilvl: 600})
 	r, err := e.RunGuildSync(context.Background(), g, "manual")
 	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 {
 		t.Fatalf("run=%+v err=%v", r, err)
@@ -202,7 +226,7 @@ func TestEnginePersistsSyncAndChangedSnapshots(t *testing.T) {
 	if err != nil || len(d.Mythic) != 1 || len(d.Snapshots) != 1 {
 		t.Fatalf("detail=%+v err=%v", d, err)
 	}
-	e.Client = fakeClient{rating: 200, ilvl: 610}
+	e.Client = &fakeClient{rating: 200, ilvl: 610}
 	e.Now = func() time.Time { return time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC) }
 	r, err = e.RunGuildSync(context.Background(), g, "manual")
 	if err != nil || r.Updated != 2 {
@@ -213,13 +237,95 @@ func TestEnginePersistsSyncAndChangedSnapshots(t *testing.T) {
 		t.Fatalf("changed snapshots=%d err=%v", len(d.Snapshots), err)
 	}
 }
+
+func TestEngineSyncsCurrentSeasonMythicPlus(t *testing.T) {
+	f := &fakeClient{rating: 1500, ilvl: 621, bestLevel: 10}
+	e, s, g := testEngine(t, f)
+	r, err := e.RunGuildSync(context.Background(), g, "manual")
+	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 {
+		t.Fatalf("run=%+v err=%v", r, err)
+	}
+	f.mu.Lock()
+	seasons := append([]string(nil), f.seasons...)
+	f.mu.Unlock()
+	if len(seasons) != 2 || seasons[0] != "current" || seasons[1] != "current" {
+		t.Fatalf("seasons requested=%v, want two requests for \"current\"", seasons)
+	}
+	chars, err := s.Characters.ListByGuild(context.Background(), g.ID, store.CharacterFilter{})
+	if err != nil || len(chars) != 2 {
+		t.Fatalf("characters=%+v err=%v", chars, err)
+	}
+	for _, c := range chars {
+		if c.ItemLevel != 621 {
+			t.Fatalf("character %s item level=%v, want 621 from profile", c.Name, c.ItemLevel)
+		}
+		d, err := s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
+		if err != nil || len(d.Mythic) != 1 || len(d.Snapshots) != 1 {
+			t.Fatalf("detail=%+v err=%v", d, err)
+		}
+		m := d.Mythic[0]
+		if m.SeasonSlug != "current" || m.OverallRating != 1500 || m.BestKeyLevel != 10 {
+			t.Fatalf("mythic=%+v, want season \"current\" rating 1500 key 10", m)
+		}
+		snap := d.Snapshots[0]
+		if snap.ItemLevel != 621 || snap.MythicRating != 1500 {
+			t.Fatalf("snapshot=%+v, want item level 621 rating 1500", snap)
+		}
+	}
+}
+func TestEngineSyncsCharacterAvatar(t *testing.T) {
+	e, s, g := testEngine(t, &fakeClient{
+		rating:   100,
+		ilvl:     600,
+		mediaURL: "https://render.worldofwarcraft.com/us/ape-avatar.jpg",
+	})
+	r, err := e.RunGuildSync(context.Background(), g, "manual")
+	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 || r.Failed != 0 {
+		t.Fatalf("run=%+v err=%v", r, err)
+	}
+	chars, err := s.Characters.ListByGuild(context.Background(), g.ID, store.CharacterFilter{})
+	if err != nil || len(chars) != 2 {
+		t.Fatalf("characters=%+v err=%v", chars, err)
+	}
+	for _, c := range chars {
+		d, err := s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.AvatarURL != "https://render.worldofwarcraft.com/us/ape-avatar.jpg" {
+			t.Fatalf("character %s avatar=%q, want the media URL", c.Name, d.AvatarURL)
+		}
+	}
+
+	// Media failures are auxiliary: the run still succeeds and no stale
+	// portrait is written.
+	e, s, g = testEngine(t, &fakeClient{
+		rating:   100,
+		ilvl:     600,
+		mediaErr: &blizzard.NotFoundError{URL: "media"},
+	})
+	r, err = e.RunGuildSync(context.Background(), g, "manual")
+	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 || r.Failed != 0 {
+		t.Fatalf("failed-media run=%+v err=%v", r, err)
+	}
+	chars, err = s.Characters.ListByGuild(context.Background(), g.ID, store.CharacterFilter{})
+	if err != nil || len(chars) != 2 {
+		t.Fatalf("characters=%+v err=%v", chars, err)
+	}
+	for _, c := range chars {
+		d, err := s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
+		if err != nil || d.AvatarURL != "" {
+			t.Fatalf("character %s avatar=%q err=%v, want empty", c.Name, d.AvatarURL, err)
+		}
+	}
+}
 func TestEngineRecordsFailures(t *testing.T) {
-	e, _, g := testEngine(t, fakeClient{profileErr: &blizzard.NotFoundError{URL: "test"}, ilvl: 600})
+	e, _, g := testEngine(t, &fakeClient{profileErr: &blizzard.NotFoundError{URL: "test"}, ilvl: 600})
 	r, err := e.RunGuildSync(context.Background(), g, "manual")
 	if err != nil || r.Status != domain.RunPartial || r.Failed != 1 {
 		t.Fatalf("run=%+v err=%v", r, err)
 	}
-	e, _, g = testEngine(t, fakeClient{rosterErr: os.ErrNotExist})
+	e, _, g = testEngine(t, &fakeClient{rosterErr: os.ErrNotExist})
 	r, err = e.RunGuildSync(context.Background(), g, "manual")
 	if err == nil || r.Status != domain.RunFailed || r.ErrorSummary == "" {
 		t.Fatalf("run=%+v err=%v", r, err)
@@ -227,7 +333,7 @@ func TestEngineRecordsFailures(t *testing.T) {
 }
 
 func TestServiceLogsRunStartAndCompletion(t *testing.T) {
-	e, _, g := testEngine(t, fakeClient{ilvl: 600})
+	e, _, g := testEngine(t, &fakeClient{ilvl: 600})
 	capture := &logCapture{}
 	e.Log = slog.New(capture)
 	service := Service{Engine: e, Guild: g, Log: slog.New(capture)}
@@ -250,7 +356,7 @@ func TestServiceLogsRunStartAndCompletion(t *testing.T) {
 }
 
 func TestEngineLogsRosterFailure(t *testing.T) {
-	e, _, g := testEngine(t, fakeClient{rosterErr: os.ErrNotExist})
+	e, _, g := testEngine(t, &fakeClient{rosterErr: os.ErrNotExist})
 	capture := &logCapture{}
 	e.Log = slog.New(capture)
 	r, err := e.RunGuildSync(context.Background(), g, "manual")

@@ -10,7 +10,7 @@ import (
 
 func TestServiceStartManualCreatesRunningRunBeforeQueueing(t *testing.T) {
 	blocked := make(chan struct{})
-	e, s, g := testEngine(t, fakeClient{ilvl: 600, profileWait: blocked})
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600, profileWait: blocked})
 	service := Service{Engine: e, Guild: g}
 	run, err := service.StartManual(context.Background())
 	if err != nil || run.ID == 0 || run.Status != domain.RunRunning {

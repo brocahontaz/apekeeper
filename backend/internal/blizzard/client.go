@@ -17,9 +17,9 @@ import (
 type BlizzardClient interface {
 	GuildRoster(context.Context, string, string) (dto.GuildRoster, error)
 	CharacterProfileSummary(context.Context, string, string) (dto.ProfileSummary, error)
-	CharacterEquipment(context.Context, string, string) (dto.Equipment, error)
 	CharacterMythicPlusSeasonal(context.Context, string, string, string) (dto.MythicPlus, error)
 	CharacterRaids(context.Context, string, string) (dto.Raids, error)
+	CharacterMedia(context.Context, string, string) (dto.CharacterMedia, error)
 	ExchangeCode(context.Context, string) (dto.Token, error)
 	UserProfile(context.Context, string) (dto.UserProfile, error)
 	AuthorizationURL(string, string) string
@@ -155,14 +155,6 @@ func (c *Client) CharacterProfileSummary(ctx context.Context, realm, name string
 		&x,
 	)
 }
-func (c *Client) CharacterEquipment(ctx context.Context, realm, name string) (dto.Equipment, error) {
-	var x dto.Equipment
-	return x, c.get(ctx,
-		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/equipment",
-		ProfileNamespace(c.Region),
-		&x,
-	)
-}
 func (c *Client) CharacterMythicPlusSeasonal(ctx context.Context, realm, name, season string) (dto.MythicPlus, error) {
 	var x dto.MythicPlus
 	return x, c.get(ctx,
@@ -175,6 +167,14 @@ func (c *Client) CharacterRaids(ctx context.Context, realm, name string) (dto.Ra
 	var x dto.Raids
 	return x, c.get(ctx,
 		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/encounters/raids",
+		ProfileNamespace(c.Region),
+		&x,
+	)
+}
+func (c *Client) CharacterMedia(ctx context.Context, realm, name string) (dto.CharacterMedia, error) {
+	var x dto.CharacterMedia
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/character-media",
 		ProfileNamespace(c.Region),
 		&x,
 	)

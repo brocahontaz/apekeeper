@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -177,7 +178,7 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 	}
 	sort, ok := store.ParseCharacterSort(q.Get("sort"))
 	if q.Get("sort") == "" {
-		sort = store.CharacterSortName
+		sort = store.CharacterSortGuildRank
 	}
 	if !ok && q.Get("sort") != "" {
 		fail(w, 400, "invalid roster sort")
@@ -262,7 +263,6 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	classes := map[string]map[string]any{}
-	specs := map[string]int{}
 	max, active, stale := 0, 0, 0
 	staleList := []map[string]any{}
 	top := []map[string]any{}
@@ -276,10 +276,13 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 				"classId":   c.ClassID,
 				"className": c.ClassName,
 				"count":     0,
+				"specs":     map[string]int{},
 			}
 		}
 		classes[c.ClassName]["count"] = classes[c.ClassName]["count"].(int) + 1
-		specs[c.SpecName]++
+		if c.SpecName != "" {
+			classes[c.ClassName]["specs"].(map[string]int)[c.SpecName]++
+		}
 		if c.Level >= domain.CurrentMaxLevel {
 			max++
 		}
@@ -340,17 +343,21 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	dist := func(m map[string]int) []map[string]any {
-		x := make([]map[string]any, 0, len(m))
-		for n, c := range m {
-			x = append(x, map[string]any{"className": n, "count": c})
-		}
-		return x
-	}
 	classDist := make([]map[string]any, 0, len(classes))
 	for _, v := range classes {
+		specDist := make([]map[string]any, 0, len(v["specs"].(map[string]int)))
+		for name, count := range v["specs"].(map[string]int) {
+			specDist = append(specDist, map[string]any{"name": name, "count": count})
+		}
+		sort.Slice(specDist, func(i, j int) bool {
+			return specDist[i]["name"].(string) < specDist[j]["name"].(string)
+		})
+		v["specs"] = specDist
 		classDist = append(classDist, v)
 	}
+	sort.Slice(classDist, func(i, j int) bool {
+		return classDist[i]["className"].(string) < classDist[j]["className"].(string)
+	})
 	for i := 0; i < len(top); i++ {
 		for j := i + 1; j < len(top); j++ {
 			if top[j]["rating"].(float64) > top[i]["rating"].(float64) {
@@ -382,7 +389,6 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		"maxLevelMembers":   max,
 		"activeMembers":     active,
 		"classDistribution": classDist,
-		"specDistribution":  dist(specs),
 		"mythicPlus": map[string]any{
 			"top":           top,
 			"averageRating": average,

@@ -114,10 +114,6 @@ func (e Engine) syncCharacter(
 	if err != nil {
 		return domain.Character{}, err
 	}
-	eq, err := e.Client.CharacterEquipment(ctx, m.Character.Realm.Slug, m.Character.Name)
-	if err != nil {
-		return domain.Character{}, err
-	}
 	c := domain.Character{
 		GuildID:        g.ID,
 		Name:           p.Name,
@@ -131,7 +127,7 @@ func (e Engine) syncCharacter(
 		SpecID:         p.ActiveSpec.ID,
 		SpecName:       p.ActiveSpec.Name,
 		Level:          p.Level,
-		ItemLevel:      eq.EquippedItemLevel,
+		ItemLevel:      p.EquippedItemLevel,
 		GuildRank:      m.Rank,
 		SyncedAt:       now,
 	}
@@ -140,16 +136,34 @@ func (e Engine) syncCharacter(
 	if err != nil {
 		return c, err
 	}
-	season := DefaultSeasonSlug
-	if p.MythicKeystoneProfile.CurrentPeriod.ID > 0 {
-		season = fmt.Sprint(p.MythicKeystoneProfile.CurrentPeriod.ID)
+	// The avatar is auxiliary: failures never fail the character and never
+	// clear a portrait that was stored by an earlier sync.
+	media, err := e.Client.CharacterMedia(ctx, m.Character.Realm.Slug, m.Character.Name)
+	if err != nil {
+		if e.Log != nil {
+			e.Log.Debug("character media unavailable", "character", c.Name, "error", err)
+		}
+	} else {
+		for _, a := range media.Assets {
+			if a.Key == "avatar" && a.Value != "" {
+				if err = e.Stores.Characters.UpdateAvatar(ctx, c.ID, a.Value); err != nil {
+					if e.Log != nil {
+						e.Log.Debug("character avatar update failed", "character", c.Name, "error", err)
+					}
+				}
+				break
+			}
+		}
 	}
+	season := DefaultSeasonSlug
 	mp, err := e.Client.CharacterMythicPlusSeasonal(ctx, m.Character.Realm.Slug, m.Character.Name, season)
 	best := 0
 	var progressionErr error
 	if err != nil {
 		if !isNotFound(err) {
 			progressionErr = err
+		} else if e.Log != nil {
+			e.Log.Debug("mythic keystone profile not found", "character", c.Name)
 		}
 	} else {
 		for _, r := range mp.BestRuns {
@@ -170,8 +184,12 @@ func (e Engine) syncCharacter(
 	raids, err := e.Client.CharacterRaids(ctx, m.Character.Realm.Slug, m.Character.Name)
 	var raidJSON = []byte("[]")
 	if err != nil {
-		if !isNotFound(err) && progressionErr == nil {
-			progressionErr = err
+		if !isNotFound(err) {
+			if progressionErr == nil {
+				progressionErr = err
+			}
+		} else if e.Log != nil {
+			e.Log.Debug("character raids not found", "character", c.Name)
 		}
 	} else {
 		raidJSON, _ = json.Marshal(raids)
