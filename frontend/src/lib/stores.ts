@@ -1,1 +1,4 @@
-import { writable } from 'svelte/store'; import type { User } from './api'; export const currentUser = writable<User | null>(null); export const sessionExpired = writable(false);
+import { writable } from "svelte/store";
+import type { User } from "./api";
+export const currentUser = writable<User | null>(null);
+export const sessionExpired = writable(false);

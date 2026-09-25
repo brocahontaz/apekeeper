@@ -53,7 +53,13 @@ func TestLoadReportsAllMissingRequiredConfiguration(t *testing.T) {
 	}
 
 	message := err.Error()
-	for _, name := range []string{"DATABASE_URL", "BLIZZARD_CLIENT_ID", "GUILD_REALM", "OAUTH_REDIRECT_URL", "SESSION_SECRET"} {
+	for _, name := range []string{
+		"DATABASE_URL",
+		"BLIZZARD_CLIENT_ID",
+		"GUILD_REALM",
+		"OAUTH_REDIRECT_URL",
+		"SESSION_SECRET",
+	} {
 		if !strings.Contains(message, name) {
 			t.Errorf("Load() error = %q, missing %s", message, name)
 		}
@@ -71,7 +77,14 @@ func TestLoadAcceptsCompleteConfigurationAndDefaults(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if c.ServerPort != "8080" || c.LogLevel != "info" || c.BlizzardRegion != "us" || c.BlizzardLocale != "en_US" || c.GuildName != "Ape Enclosure" || c.GuildRegion != "us" || c.SyncSchedule != "03:00" || c.StaticDir != "" {
+	if c.ServerPort != "8080" ||
+		c.LogLevel != "info" ||
+		c.BlizzardRegion != "us" ||
+		c.BlizzardLocale != "en_US" ||
+		c.GuildName != "Ape Enclosure" ||
+		c.GuildRegion != "us" ||
+		c.SyncSchedule != "03:00" ||
+		c.StaticDir != "" {
 		t.Errorf("Load() defaults = %+v, want documented defaults", c)
 	}
 }

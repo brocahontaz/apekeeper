@@ -23,7 +23,9 @@ type Trigger interface {
 }
 type TriggerFunc func(context.Context) (int64, error)
 
-func (f TriggerFunc) Trigger(c context.Context) (int64, error) { return f(c) }
+func (f TriggerFunc) Trigger(c context.Context) (int64, error) {
+	return f(c)
+}
 
 type API struct {
 	Stores    store.Store
@@ -56,8 +58,10 @@ func New(a API) http.Handler {
 	m.Handle("GET /api/dashboard", a.requireAuth(http.HandlerFunc(a.dashboard)))
 	m.Handle("GET /api/roster", a.requireAuth(http.HandlerFunc(a.roster)))
 	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
-	m.Handle("GET /api/sync/runs", a.requireRole([]string{"admin", "officer"}, http.HandlerFunc(a.syncRuns)))
-	m.Handle("POST /api/sync/run", a.requireRole([]string{"admin"}, http.HandlerFunc(a.triggerSync)))
+	m.Handle("GET /api/sync/runs",
+		a.requireRole([]string{"admin", "officer"}, http.HandlerFunc(a.syncRuns)))
+	m.Handle("POST /api/sync/run",
+		a.requireRole([]string{"admin"}, http.HandlerFunc(a.triggerSync)))
 	return spa(m, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
@@ -132,7 +136,12 @@ func (a API) health(w http.ResponseWriter, r *http.Request) {
 }
 func (a API) me(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(contextKey{}).(domain.User)
-	jsonOut(w, 200, map[string]any{"id": u.ID, "displayName": u.DisplayName, "battletag": u.BattleTag, "appRole": u.Role})
+	jsonOut(w, 200, map[string]any{
+		"id":          u.ID,
+		"displayName": u.DisplayName,
+		"battletag":   u.BattleTag,
+		"appRole":     u.Role,
+	})
 }
 func (a API) roster(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
@@ -141,7 +150,11 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	f := store.CharacterFilter{Class: q.Get("class"), Spec: q.Get("spec"), Name: q.Get("search")}
+	f := store.CharacterFilter{
+		Class: q.Get("class"),
+		Spec:  q.Get("spec"),
+		Name:  q.Get("search"),
+	}
 	if v, ok := integer(q.Get("rank")); ok {
 		f.Rank = &v
 	}
@@ -166,9 +179,27 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, out)
 }
-func integer(s string) (int, bool) { v, e := strconv.Atoi(s); return v, e == nil && s != "" }
+func integer(s string) (int, bool) {
+	v, e := strconv.Atoi(s)
+	return v, e == nil && s != ""
+}
 func characterJSON(c domain.Character, now time.Time) map[string]any {
-	return map[string]any{"id": c.ID, "name": c.DisplayName, "realm": c.Realm, "classId": c.ClassID, "className": c.ClassName, "specId": c.SpecID, "specName": c.SpecName, "level": c.Level, "itemLevel": c.ItemLevel, "guildRank": c.GuildRank, "mythicRating": c.MythicRating, "bestKeyLevel": c.BestKeyLevel, "syncedAt": c.SyncedAt, "stale": c.IsStale(now, 7*24*time.Hour)}
+	return map[string]any{
+		"id":           c.ID,
+		"name":         c.DisplayName,
+		"realm":        c.Realm,
+		"classId":      c.ClassID,
+		"className":    c.ClassName,
+		"specId":       c.SpecID,
+		"specName":     c.SpecName,
+		"level":        c.Level,
+		"itemLevel":    c.ItemLevel,
+		"guildRank":    c.GuildRank,
+		"mythicRating": c.MythicRating,
+		"bestKeyLevel": c.BestKeyLevel,
+		"syncedAt":     c.SyncedAt,
+		"stale":        c.IsStale(now, 7*24*time.Hour),
+	}
 }
 func (a API) character(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
@@ -215,7 +246,11 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	notable := []map[string]any{}
 	for _, c := range chars {
 		if classes[c.ClassName] == nil {
-			classes[c.ClassName] = map[string]any{"classId": c.ClassID, "className": c.ClassName, "count": 0}
+			classes[c.ClassName] = map[string]any{
+				"classId":   c.ClassID,
+				"className": c.ClassName,
+				"count":     0,
+			}
 		}
 		classes[c.ClassName]["count"] = classes[c.ClassName]["count"].(int) + 1
 		specs[c.SpecName]++
@@ -228,7 +263,12 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		if c.IsStale(a.now(), 7*24*time.Hour) {
 			stale++
 			if len(staleList) < 10 {
-				staleList = append(staleList, map[string]any{"name": c.DisplayName, "realm": c.Realm, "syncedAt": c.SyncedAt, "stalenessDays": int(a.now().Sub(c.SyncedAt).Hours() / 24)})
+				staleList = append(staleList, map[string]any{
+					"name":          c.DisplayName,
+					"realm":         c.Realm,
+					"syncedAt":      c.SyncedAt,
+					"stalenessDays": int(a.now().Sub(c.SyncedAt).Hours() / 24),
+				})
 			}
 		}
 		d, err := a.Stores.Characters.Detail(r.Context(), g.ID, c.ID, a.now().Add(-30*24*time.Hour))
@@ -244,7 +284,12 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		if bestRating > 0 {
 			rated++
 			ratingTotal += bestRating
-			top = append(top, map[string]any{"name": c.DisplayName, "realm": c.Realm, "rating": bestRating, "bestKey": bestKey})
+			top = append(top, map[string]any{
+				"name":    c.DisplayName,
+				"realm":   c.Realm,
+				"rating":  bestRating,
+				"bestKey": bestKey,
+			})
 		}
 		for _, rp := range d.Raids {
 			if raids[rp.RaidName] == nil {
@@ -259,8 +304,13 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(d.Snapshots) > 1 {
 			first, last := d.Snapshots[0], d.Snapshots[len(d.Snapshots)-1]
-			if first.CapturedAt.Before(a.now().Add(-14*24*time.Hour)) && (last.MythicRating > first.MythicRating || last.ItemLevel > first.ItemLevel) {
-				notable = append(notable, map[string]any{"name": c.DisplayName, "ratingDelta": last.MythicRating - first.MythicRating, "itemLevelDelta": last.ItemLevel - first.ItemLevel})
+			if first.CapturedAt.Before(a.now().Add(-14*24*time.Hour)) &&
+				(last.MythicRating > first.MythicRating || last.ItemLevel > first.ItemLevel) {
+				notable = append(notable, map[string]any{
+					"name":           c.DisplayName,
+					"ratingDelta":    last.MythicRating - first.MythicRating,
+					"itemLevelDelta": last.ItemLevel - first.ItemLevel,
+				})
 			}
 		}
 	}
@@ -301,7 +351,25 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	if rated > 0 {
 		average = ratingTotal / float64(rated)
 	}
-	jsonOut(w, 200, map[string]any{"rosterSize": len(chars), "maxLevelMembers": max, "activeMembers": active, "classDistribution": classDist, "specDistribution": dist(specs), "mythicPlus": map[string]any{"top": top, "averageRating": average, "ratedCount": rated}, "raidProgression": raidOut, "staleCharacters": map[string]any{"count": stale, "characters": staleList}, "lastSync": last, "notableChanges": notable})
+	jsonOut(w, 200, map[string]any{
+		"rosterSize":        len(chars),
+		"maxLevelMembers":   max,
+		"activeMembers":     active,
+		"classDistribution": classDist,
+		"specDistribution":  dist(specs),
+		"mythicPlus": map[string]any{
+			"top":           top,
+			"averageRating": average,
+			"ratedCount":    rated,
+		},
+		"raidProgression": raidOut,
+		"staleCharacters": map[string]any{
+			"count":      stale,
+			"characters": staleList,
+		},
+		"lastSync":       last,
+		"notableChanges": notable,
+	})
 }
 func (a API) syncRuns(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())

@@ -11,5 +11,11 @@ type Store struct {
 }
 
 func New(pool *pgxpool.Pool) Store {
-	return Store{Guilds: GuildStore{pool}, Characters: CharacterStore{pool}, Progression: ProgressionStore{pool}, SyncRuns: SyncRunStore{pool}, Users: UserStore{pool}}
+	return Store{
+		Guilds:      GuildStore{pool},
+		Characters:  CharacterStore{pool},
+		Progression: ProgressionStore{pool},
+		SyncRuns:    SyncRunStore{pool},
+		Users:       UserStore{pool},
+	}
 }

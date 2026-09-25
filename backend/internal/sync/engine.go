@@ -86,7 +86,12 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 	err = e.Stores.SyncRuns.Finish(ctx, run)
 	return run, err
 }
-func (e Engine) syncCharacter(ctx context.Context, g domain.Guild, m dto.RosterMember, now time.Time) (domain.Character, error) {
+func (e Engine) syncCharacter(
+	ctx context.Context,
+	g domain.Guild,
+	m dto.RosterMember,
+	now time.Time,
+) (domain.Character, error) {
 	p, err := e.Client.CharacterProfileSummary(ctx, m.Character.Realm.Slug, m.Character.Name)
 	if err != nil {
 		return domain.Character{}, err
@@ -95,7 +100,23 @@ func (e Engine) syncCharacter(ctx context.Context, g domain.Guild, m dto.RosterM
 	if err != nil {
 		return domain.Character{}, err
 	}
-	c := domain.Character{GuildID: g.ID, Name: p.Name, DisplayName: p.Name, NormalizedName: domain.NormalizeCharacterName(p.Name), Realm: p.Realm.Name, RealmSlug: p.Realm.Slug, Region: g.Region, ClassID: p.CharacterClass.ID, ClassName: p.CharacterClass.Name, SpecID: p.ActiveSpec.ID, SpecName: p.ActiveSpec.Name, Level: p.Level, ItemLevel: eq.EquippedItemLevel, GuildRank: m.Rank, SyncedAt: now}
+	c := domain.Character{
+		GuildID:        g.ID,
+		Name:           p.Name,
+		DisplayName:    p.Name,
+		NormalizedName: domain.NormalizeCharacterName(p.Name),
+		Realm:          p.Realm.Name,
+		RealmSlug:      p.Realm.Slug,
+		Region:         g.Region,
+		ClassID:        p.CharacterClass.ID,
+		ClassName:      p.CharacterClass.Name,
+		SpecID:         p.ActiveSpec.ID,
+		SpecName:       p.ActiveSpec.Name,
+		Level:          p.Level,
+		ItemLevel:      eq.EquippedItemLevel,
+		GuildRank:      m.Rank,
+		SyncedAt:       now,
+	}
 	raw, _ := json.Marshal(p)
 	c, err = e.Stores.Characters.UpsertByGuildIdentity(ctx, c, raw)
 	if err != nil {
@@ -118,7 +139,13 @@ func (e Engine) syncCharacter(ctx context.Context, g domain.Guild, m dto.RosterM
 				best = r.MythicLevel
 			}
 		}
-		if err = e.Stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{CharacterID: c.ID, SeasonSlug: season, OverallRating: mp.CurrentMythicRating.Rating, BestKeyLevel: best, SyncedAt: now}); err != nil {
+		if err = e.Stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
+			CharacterID:   c.ID,
+			SeasonSlug:    season,
+			OverallRating: mp.CurrentMythicRating.Rating,
+			BestKeyLevel:  best,
+			SyncedAt:      now,
+		}); err != nil {
 			progressionErr = err
 		}
 	}
@@ -133,7 +160,16 @@ func (e Engine) syncCharacter(ctx context.Context, g domain.Guild, m dto.RosterM
 		for _, ex := range raids.Expansions {
 			for _, r := range ex.Instances {
 				for _, mode := range r.Modes {
-					if err = e.Stores.Progression.UpsertRaid(ctx, domain.RaidProgression{CharacterID: c.ID, RaidSlug: r.Instance.Slug, RaidName: r.Instance.Name, Difficulty: mode.Difficulty.Name, Progress: mode.Progress.CompletedCount, TotalBosses: mode.Progress.TotalCount, Summary: raidJSON, SyncedAt: now}); err != nil && progressionErr == nil {
+					if err = e.Stores.Progression.UpsertRaid(ctx, domain.RaidProgression{
+						CharacterID: c.ID,
+						RaidSlug:    r.Instance.Slug,
+						RaidName:    r.Instance.Name,
+						Difficulty:  mode.Difficulty.Name,
+						Progress:    mode.Progress.CompletedCount,
+						TotalBosses: mode.Progress.TotalCount,
+						Summary:     raidJSON,
+						SyncedAt:    now,
+					}); err != nil && progressionErr == nil {
 						progressionErr = err
 					}
 				}
@@ -142,7 +178,14 @@ func (e Engine) syncCharacter(ctx context.Context, g domain.Guild, m dto.RosterM
 	}
 	// Once the character is upserted, progression failures remain per-character
 	// failures but do not discard the profile data that a snapshot can preserve.
-	if err = e.capture(ctx, c, domain.Snapshot{CharacterID: c.ID, CapturedAt: now, ItemLevel: c.ItemLevel, MythicRating: mp.CurrentMythicRating.Rating, BestKeyLevel: best, RaidProgress: raidJSON}); err != nil {
+	if err = e.capture(ctx, c, domain.Snapshot{
+		CharacterID:  c.ID,
+		CapturedAt:   now,
+		ItemLevel:    c.ItemLevel,
+		MythicRating: mp.CurrentMythicRating.Rating,
+		BestKeyLevel: best,
+		RaidProgress: raidJSON,
+	}); err != nil {
 		return c, err
 	}
 	return c, progressionErr

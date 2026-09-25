@@ -57,18 +57,51 @@ func main() {
 	defer pool.Close()
 	logg := logger.New(cfg.LogLevel)
 	stores := store.New(pool)
-	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: blizzard.Slug(cfg.GuildName + "-" + cfg.GuildRealm), Name: cfg.GuildName, Realm: cfg.GuildRealm, Region: cfg.GuildRegion})
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{
+		Slug:   blizzard.Slug(cfg.GuildName + "-" + cfg.GuildRealm),
+		Name:   cfg.GuildName,
+		Realm:  cfg.GuildRealm,
+		Region: cfg.GuildRegion,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	client := blizzard.NewClient(cfg.BlizzardRegion, cfg.BlizzardLocale, cfg.BlizzardClientID, cfg.BlizzardClientSecret, cfg.OAuthRedirectURL)
-	service := &appsync.Service{Engine: appsync.Engine{Client: client, Stores: stores}, Guild: guild}
+	client := blizzard.NewClient(
+		cfg.BlizzardRegion,
+		cfg.BlizzardLocale,
+		cfg.BlizzardClientID,
+		cfg.BlizzardClientSecret,
+		cfg.OAuthRedirectURL,
+	)
+	service := &appsync.Service{
+		Engine: appsync.Engine{
+			Client: client,
+			Stores: stores,
+		},
+		Guild: guild,
+	}
 	scheduler := sched.New(cfg.SyncSchedule, logg)
-	go scheduler.Run(ctx, func(c context.Context) { _, _ = service.Start(c, "scheduled") })
+	go scheduler.Run(ctx, func(c context.Context) {
+		_, _ = service.Start(c, "scheduled")
+	})
 	manager := auth.New(client, stores.Users, cfg.OAuthRedirectURL, []byte(cfg.SessionSecret))
-	trigger := httpapi.TriggerFunc(func(c context.Context) (int64, error) { r, e := service.StartManual(c); return r.ID, e })
-	api := httpapi.New(httpapi.API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Trigger: trigger, Ping: pool, StaticDir: cfg.StaticDir})
-	server := &http.Server{Addr: ":" + cfg.ServerPort, Handler: logger.RequestLog(api, logg), ReadHeaderTimeout: 5 * time.Second}
+	trigger := httpapi.TriggerFunc(func(c context.Context) (int64, error) {
+		r, e := service.StartManual(c)
+		return r.ID, e
+	})
+	api := httpapi.New(httpapi.API{
+		Stores:    stores,
+		Auth:      manager,
+		GuildSlug: guild.Slug,
+		Trigger:   trigger,
+		Ping:      pool,
+		StaticDir: cfg.StaticDir,
+	})
+	server := &http.Server{
+		Addr:              ":" + cfg.ServerPort,
+		Handler:           logger.RequestLog(api, logg),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, c := context.WithTimeout(context.Background(), 10*time.Second)

@@ -23,9 +23,13 @@ type BlizzardClient interface {
 	UserProfile(context.Context, string) (dto.UserProfile, error)
 	AuthorizationURL(string, string) string
 }
-type NotFoundError struct{ URL string }
+type NotFoundError struct {
+	URL string
+}
 
-func (e *NotFoundError) Error() string { return "Blizzard resource not found: " + e.URL }
+func (e *NotFoundError) Error() string {
+	return "Blizzard resource not found: " + e.URL
+}
 
 type Client struct {
 	Region, Locale, ClientID, ClientSecret string
@@ -37,7 +41,17 @@ type Client struct {
 }
 
 func NewClient(region, locale, id, secret, redirect string) *Client {
-	return &Client{Region: region, Locale: locale, ClientID: id, ClientSecret: secret, Redirect: redirect, HTTP: &http.Client{Timeout: 20 * time.Second}, APIBase: "https://" + region + ".api.blizzard.com", OAuthBase: "https://oauth.battle.net", limiter: NewLimiter(0, 0, time.Second)}
+	return &Client{
+		Region:       region,
+		Locale:       locale,
+		ClientID:     id,
+		ClientSecret: secret,
+		Redirect:     redirect,
+		HTTP:         &http.Client{Timeout: 20 * time.Second},
+		APIBase:      "https://" + region + ".api.blizzard.com",
+		OAuthBase:    "https://oauth.battle.net",
+		limiter:      NewLimiter(0, 0, time.Second),
+	}
 }
 func (c *Client) get(ctx context.Context, path, namespace string, out any) error {
 	return c.request(ctx, http.MethodGet, c.APIBase+path, namespace, nil, out)
@@ -107,23 +121,48 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 }
 func (c *Client) GuildRoster(ctx context.Context, realm, guild string) (dto.GuildRoster, error) {
 	var x dto.GuildRoster
-	return x, c.get(ctx, "/data/wow/guild/"+RealmSlug(realm)+"/"+Slug(guild)+"/roster", DynamicNamespace(c.Region), &x)
+	return x, c.get(ctx,
+		"/data/wow/guild/"+RealmSlug(realm)+"/"+Slug(guild)+"/roster",
+		DynamicNamespace(c.Region),
+		&x,
+	)
 }
 func (c *Client) CharacterProfileSummary(ctx context.Context, realm, name string) (dto.ProfileSummary, error) {
 	var x dto.ProfileSummary
-	return x, c.get(ctx, "/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name), ProfileNamespace(c.Region), &x)
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name),
+		ProfileNamespace(c.Region),
+		&x,
+	)
 }
 func (c *Client) CharacterEquipment(ctx context.Context, realm, name string) (dto.Equipment, error) {
 	var x dto.Equipment
-	return x, c.get(ctx, "/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/equipment", ProfileNamespace(c.Region), &x)
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/equipment",
+		ProfileNamespace(c.Region),
+		&x,
+	)
 }
 func (c *Client) CharacterMythicPlusSeasonal(ctx context.Context, realm, name, season string) (dto.MythicPlus, error) {
 	var x dto.MythicPlus
-	return x, c.get(ctx, "/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/mythic-keystone-profile/season/"+season, DynamicNamespace(c.Region), &x)
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/mythic-keystone-profile/season/"+season,
+		DynamicNamespace(c.Region),
+		&x,
+	)
 }
 func (c *Client) CharacterRaids(ctx context.Context, realm, name string) (dto.Raids, error) {
 	var x dto.Raids
-	return x, c.get(ctx, "/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/encounters/raids", DynamicNamespace(c.Region), &x)
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/encounters/raids",
+		DynamicNamespace(c.Region),
+		&x,
+	)
 }
-func Slug(s string) string      { return strings.ReplaceAll(strings.ToLower(s), " ", "-") }
-func RealmSlug(s string) string { return Slug(s) }
+func Slug(s string) string {
+	return strings.ReplaceAll(strings.ToLower(s), " ", "-")
+}
+
+func RealmSlug(s string) string {
+	return Slug(s)
+}

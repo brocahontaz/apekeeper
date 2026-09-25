@@ -37,18 +37,31 @@ func TestListByGuildReturnsEachCharacterOnceAcrossMythicSeasons(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{GuildID: g.ID, Name: "One", DisplayName: "One", NormalizedName: "one", Realm: "Area 52", RealmSlug: "area-52", Region: "us", SyncedAt: now}, []byte("{}"))
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range []domain.MythicPlus{{CharacterID: c.ID, SeasonSlug: "one", OverallRating: 1000, BestKeyLevel: 12, SyncedAt: now}, {CharacterID: c.ID, SeasonSlug: "two", OverallRating: 2000, BestKeyLevel: 15, SyncedAt: now}} {
+	for _, m := range []domain.MythicPlus{
+		{CharacterID: c.ID, SeasonSlug: "one", OverallRating: 1000, BestKeyLevel: 12, SyncedAt: now},
+		{CharacterID: c.ID, SeasonSlug: "two", OverallRating: 2000, BestKeyLevel: 15, SyncedAt: now},
+	} {
 		if err := s.Progression.UpsertMythicPlus(ctx, m); err != nil {
 			t.Fatal(err)
 		}
 	}
 	minRating := 1500.0
 	rows, err := s.Characters.ListByGuild(ctx, g.ID, store.CharacterFilter{MinRating: &minRating})
-	if err != nil || len(rows) != 1 || rows[0].ID != c.ID || rows[0].MythicRating != 2000 || rows[0].BestKeyLevel != 15 {
+	if err != nil || len(rows) != 1 || rows[0].ID != c.ID ||
+		rows[0].MythicRating != 2000 || rows[0].BestKeyLevel != 15 {
 		t.Fatalf("qualified rows=%+v err=%v", rows, err)
 	}
 	minRating = 2500

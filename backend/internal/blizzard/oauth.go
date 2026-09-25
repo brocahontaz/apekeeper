@@ -35,7 +35,11 @@ func (c *Client) appToken(ctx context.Context) (string, error) {
 		return c.token.value, nil
 	}
 	var x dto.Token
-	e := c.request(ctx, "POST", c.OAuthBase+"/token", "", url.Values{"grant_type": {"client_credentials"}, "client_id": {c.ClientID}, "client_secret": {c.ClientSecret}}, &x)
+	e := c.request(ctx, "POST", c.OAuthBase+"/token", "", url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {c.ClientID},
+		"client_secret": {c.ClientSecret},
+	}, &x)
 	if e != nil {
 		return "", e
 	}
@@ -45,7 +49,12 @@ func (c *Client) appToken(ctx context.Context) (string, error) {
 }
 func (c *Client) ExchangeCode(ctx context.Context, code string) (dto.Token, error) {
 	var x dto.Token
-	v := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {c.ClientID}, "client_secret": {c.ClientSecret}}
+	v := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {c.ClientID},
+		"client_secret": {c.ClientSecret},
+	}
 	if c.Redirect != "" {
 		v.Set("redirect_uri", c.Redirect)
 	}
