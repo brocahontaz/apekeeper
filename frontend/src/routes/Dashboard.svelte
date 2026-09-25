@@ -30,9 +30,6 @@
     <section>
       <h2>Apelytics · Class ranks</h2>
       <ClassDistribution classes={data.classDistribution} />
-      <div class="chips">
-        {#each data.specDistribution as spec}<span>{spec.className} {spec.count}</span>{/each}
-      </div>
     </section>
     <section>
       <h2>M+ Vanguard</h2>

@@ -17,6 +17,7 @@ export type Character = {
   level: number;
   itemLevel: number;
   guildRank?: number;
+  avatarUrl?: string;
   mythicRating: number;
   bestKeyLevel: number;
   syncedAt?: string;
@@ -47,8 +48,12 @@ export type Dashboard = {
   rosterSize: number;
   maxLevelMembers: number;
   activeMembers: number;
-  classDistribution: { classId: number; className: string; count: number }[];
-  specDistribution: { className: string; count: number }[];
+  classDistribution: {
+    classId: number;
+    className: string;
+    count: number;
+    specs: { name: string; count: number }[];
+  }[];
   mythicPlus: {
     top: { name: string; realm: string; rating: number; bestKey: number }[];
     averageRating: number;

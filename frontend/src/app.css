@@ -147,12 +147,17 @@ section,
   gap: 18px;
 }
 .dist-row {
+  position: relative;
   display: grid;
   grid-template-columns: 100px 1fr 30px;
   gap: 8px;
   align-items: center;
   font-size: 12px;
   margin: 9px 0;
+}
+.dist-row:focus-visible {
+  outline: 2px solid #f5c15e;
+  outline-offset: 2px;
 }
 .bar-track {
   height: 7px;
@@ -162,16 +167,22 @@ section,
   display: block;
   height: 100%;
 }
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 20px;
-}
-.chips span {
+.dist-tip {
+  display: none;
+  position: absolute;
+  left: 108px;
+  bottom: calc(100% + 2px);
+  z-index: 5;
   border: 1px solid #48554a;
+  background: #141518;
   padding: 4px 7px;
   font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.dist-row:hover .dist-tip,
+.dist-row:focus-visible .dist-tip {
+  display: block;
 }
 table {
   border-collapse: collapse;
@@ -302,6 +313,13 @@ small {
   place-items: center;
   font-size: 26px;
   color: #f5c15e;
+  overflow: hidden;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .gold {
   background: #e8a33d;

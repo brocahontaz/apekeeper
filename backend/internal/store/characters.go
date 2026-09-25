@@ -107,6 +107,15 @@ func (s CharacterStore) UpsertByGuildIdentity(
 	return c, e
 }
 
+// UpdateAvatar stores a character portrait URL without touching sync state.
+func (s CharacterStore) UpdateAvatar(ctx context.Context, characterID int64, avatarURL string) error {
+	_, e := s.pool.Exec(ctx,
+		`UPDATE characters SET avatar_url=$2, updated_at=now() WHERE id=$1`,
+		characterID, avatarURL,
+	)
+	return e
+}
+
 func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since time.Time) (CharacterDetail, error) {
 	var d CharacterDetail
 	err := s.pool.QueryRow(ctx, `SELECT

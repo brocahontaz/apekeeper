@@ -94,12 +94,15 @@ func TestRequestLogsFailedAttemptsAtDebug(t *testing.T) {
 
 func TestProfileDTOFixture(t *testing.T) {
 	var p dto.ProfileSummary
-	fixture := `{"name":"Thrall","realm":{"name":"Area 52","slug":"area-52"},"level":70,"character_class":{"id":7,"name":"Shaman"},"active_spec":{"id":262,"name":"Elemental"}}`
+	fixture := `{"name":"Thrall","realm":{"name":"Area 52","slug":"area-52"},"level":70,"character_class":{"id":7,"name":"Shaman"},"active_spec":{"id":262,"name":"Elemental"},"equipped_item_level":621,"average_item_level":619}`
 	if err := json.Unmarshal([]byte(fixture), &p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Name != "Thrall" || p.Realm.Slug != "area-52" || p.CharacterClass.ID != 7 || p.ActiveSpec.Name != "Elemental" {
 		t.Fatalf("unexpected DTO: %#v", p)
+	}
+	if p.EquippedItemLevel != 621 || p.AverageItemLevel != 619 {
+		t.Fatalf("item levels = %v/%v, want 621/619", p.EquippedItemLevel, p.AverageItemLevel)
 	}
 }
 
@@ -156,6 +159,43 @@ func TestCharacterProgressionUsesProfileNamespace(t *testing.T) {
 	}
 	if len(gotNamespaces) != 2 {
 		t.Fatalf("progression requests=%d, want 2", len(gotNamespaces))
+	}
+}
+
+func TestCharacterMediaUsesProfileNamespace(t *testing.T) {
+	var gotNamespace string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "test-token", ExpiresIn: 120})
+			return
+		}
+		gotNamespace = r.URL.Query().Get("namespace")
+		_, _ = w.Write([]byte(`{"assets":[{"key":"avatar","value":"https://render.worldofwarcraft.com/avatar.jpg"},{"key":"main","value":"https://render.worldofwarcraft.com/main.jpg"}]}`))
+	}))
+	defer s.Close()
+	c := NewClient("eu", "en_GB", "", "", "")
+	defer c.limiter.Close()
+	c.APIBase = s.URL
+	c.OAuthBase = s.URL
+
+	m, err := c.CharacterMedia(context.Background(), "Tarren Mill", "Ape Enclosure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotNamespace != "profile-eu" {
+		t.Fatalf("namespace=%q, want profile-eu", gotNamespace)
+	}
+	if len(m.Assets) != 2 {
+		t.Fatalf("assets=%d, want 2", len(m.Assets))
+	}
+	var avatar string
+	for _, a := range m.Assets {
+		if a.Key == "avatar" {
+			avatar = a.Value
+		}
+	}
+	if avatar != "https://render.worldofwarcraft.com/avatar.jpg" {
+		t.Fatalf("avatar=%q", avatar)
 	}
 }
 

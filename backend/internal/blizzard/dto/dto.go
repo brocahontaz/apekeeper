@@ -32,14 +32,8 @@ type ProfileSummary struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	} `json:"character_class"`
-	MythicKeystoneProfile struct {
-		CurrentPeriod struct {
-			ID int `json:"id"`
-		} `json:"current_period"`
-	} `json:"mythic_keystone_profile"`
-}
-type Equipment struct {
 	EquippedItemLevel float64 `json:"equipped_item_level"`
+	AverageItemLevel  float64 `json:"average_item_level"`
 }
 type MythicPlus struct {
 	CurrentMythicRating struct {
@@ -68,6 +62,13 @@ type Raids struct {
 			} `json:"modes"`
 		} `json:"instances"`
 	} `json:"expansions"`
+}
+type MediaAsset struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+type CharacterMedia struct {
+	Assets []MediaAsset `json:"assets"`
 }
 type Token struct {
 	AccessToken  string `json:"access_token"`
