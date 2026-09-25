@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +39,7 @@ func TestRequestRetries429(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "yes"})
 	}))
 	defer s.Close()
-	c := NewClient("us", "en_US", "", "")
+	c := NewClient("us", "en_US", "", "", "")
 	defer c.limiter.Close()
 	var out struct {
 		OK string `json:"ok"`
@@ -68,7 +70,7 @@ func TestTokenCacheReusesValidToken(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "token", ExpiresIn: 120})
 	}))
 	defer s.Close()
-	c := NewClient("us", "en_US", "id", "secret")
+	c := NewClient("us", "en_US", "id", "secret", "")
 	defer c.limiter.Close()
 	c.OAuthBase = s.URL
 	first, err := c.appToken(context.Background())
@@ -81,5 +83,39 @@ func TestTokenCacheReusesValidToken(t *testing.T) {
 	}
 	if first != "token" || second != "token" || calls != 1 {
 		t.Fatalf("calls=%d", calls)
+	}
+}
+
+func TestExchangeCodeSendsRedirectURI(t *testing.T) {
+	var form url.Values
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		form = r.PostForm
+		_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "token", ExpiresIn: 120})
+	}))
+	defer s.Close()
+	c := NewClient("us", "en_US", "id", "secret", "https://example.test/callback")
+	defer c.limiter.Close()
+	c.OAuthBase = s.URL
+	if _, err := c.ExchangeCode(context.Background(), "code"); err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("redirect_uri") != "https://example.test/callback" || form.Get("code") != "code" || form.Get("grant_type") != "authorization_code" {
+		t.Fatalf("form=%v", form)
+	}
+}
+
+func TestExchangeCodeSurfacesErrorBody(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer s.Close()
+	c := NewClient("us", "en_US", "id", "secret", "https://example.test/callback")
+	defer c.limiter.Close()
+	c.OAuthBase = s.URL
+	_, err := c.ExchangeCode(context.Background(), "bad")
+	if err == nil || !strings.Contains(err.Error(), "Blizzard HTTP 400") || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("err=%v", err)
 	}
 }

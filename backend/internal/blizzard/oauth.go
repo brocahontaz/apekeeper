@@ -45,8 +45,11 @@ func (c *Client) appToken(ctx context.Context) (string, error) {
 }
 func (c *Client) ExchangeCode(ctx context.Context, code string) (dto.Token, error) {
 	var x dto.Token
-	e := c.request(ctx, "POST", c.OAuthBase+"/token", "", url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {c.ClientID}, "client_secret": {c.ClientSecret}}, &x)
-	return x, e
+	v := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {c.ClientID}, "client_secret": {c.ClientSecret}}
+	if c.Redirect != "" {
+		v.Set("redirect_uri", c.Redirect)
+	}
+	return x, c.request(ctx, "POST", c.OAuthBase+"/token", "", v, &x)
 }
 func (c *Client) UserProfile(ctx context.Context, accessToken string) (dto.UserProfile, error) {
 	var x dto.UserProfile
