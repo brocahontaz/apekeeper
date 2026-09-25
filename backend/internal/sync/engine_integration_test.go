@@ -3,7 +3,9 @@ package sync
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,48 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 	"github.com/brocahontaz/apekeeper/backend/internal/testdb"
 )
+
+type logCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, r.Clone())
+	return nil
+}
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *logCapture) WithGroup(string) slog.Handler      { return c }
+
+func (c *logCapture) find(level slog.Level, msg string) (slog.Record, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r.Level == level && r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+func (c *logCapture) attr(level slog.Level, msg, key string) (slog.Value, bool) {
+	r, ok := c.find(level, msg)
+	if !ok {
+		return slog.Value{}, false
+	}
+	var found slog.Value
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			found = a.Value
+			return false
+		}
+		return true
+	})
+	return found, true
+}
 
 type fakeClient struct {
 	rating, ilvl          float64
@@ -179,5 +223,44 @@ func TestEngineRecordsFailures(t *testing.T) {
 	r, err = e.RunGuildSync(context.Background(), g, "manual")
 	if err == nil || r.Status != domain.RunFailed || r.ErrorSummary == "" {
 		t.Fatalf("run=%+v err=%v", r, err)
+	}
+}
+
+func TestServiceLogsRunStartAndCompletion(t *testing.T) {
+	e, _, g := testEngine(t, fakeClient{ilvl: 600})
+	capture := &logCapture{}
+	e.Log = slog.New(capture)
+	service := Service{Engine: e, Guild: g, Log: slog.New(capture)}
+	r, err := service.Start(context.Background(), "manual")
+	if err != nil || r.Status != domain.RunSuccess {
+		t.Fatalf("run=%+v err=%v", r, err)
+	}
+	if _, ok := capture.find(slog.LevelInfo, "sync run started"); !ok {
+		t.Error("missing sync run started record")
+	}
+	if _, ok := capture.find(slog.LevelInfo, "sync run completed"); !ok {
+		t.Fatal("missing sync run completed record")
+	}
+	if status, ok := capture.attr(slog.LevelInfo, "sync run completed", "status"); !ok || status.String() != string(domain.RunSuccess) {
+		t.Errorf("completed record status = %v, want %q", status, domain.RunSuccess)
+	}
+	if runID, ok := capture.attr(slog.LevelInfo, "sync run completed", "runId"); !ok || runID.Int64() != r.ID {
+		t.Errorf("completed record runId = %v, want %d", runID, r.ID)
+	}
+}
+
+func TestEngineLogsRosterFailure(t *testing.T) {
+	e, _, g := testEngine(t, fakeClient{rosterErr: os.ErrNotExist})
+	capture := &logCapture{}
+	e.Log = slog.New(capture)
+	r, err := e.RunGuildSync(context.Background(), g, "manual")
+	if err == nil || r.Status != domain.RunFailed {
+		t.Fatalf("run=%+v err=%v", r, err)
+	}
+	if _, ok := capture.find(slog.LevelError, "guild roster sync failed"); !ok {
+		t.Error("missing guild roster sync failed record")
+	}
+	if _, ok := capture.find(slog.LevelWarn, "sync run finish failed"); ok {
+		t.Error("unexpected sync run finish failed record")
 	}
 }

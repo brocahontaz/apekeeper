@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,8 +37,10 @@ type Client struct {
 	Redirect                               string
 	HTTP                                   *http.Client
 	APIBase, OAuthBase                     string
-	limiter                                *Limiter
-	token                                  tokenCache
+	// Log is optional; when nil the client stays silent.
+	Log     *slog.Logger
+	limiter *Limiter
+	token   tokenCache
 }
 
 func NewClient(region, locale, id, secret, redirect string) *Client {
@@ -57,6 +60,12 @@ func (c *Client) get(ctx context.Context, path, namespace string, out any) error
 	return c.request(ctx, http.MethodGet, c.APIBase+path, namespace, nil, out)
 }
 func (c *Client) request(ctx context.Context, method, u, namespace string, body url.Values, out any) error {
+	// Only the URL path may be logged: the query, headers, and body can carry
+	// secrets such as tokens, client credentials, and grant codes.
+	logPath := u
+	if p, e := url.Parse(u); e == nil {
+		logPath = p.Path
+	}
 	for i := 0; i < MaxAttempts; i++ {
 		if e := c.limiter.Wait(ctx); e != nil {
 			return e
@@ -90,6 +99,7 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 		}
 		res, e := c.HTTP.Do(req)
 		if e != nil {
+			c.logFailedAttempt(method, logPath, i+1, "error", e)
 			if i == MaxAttempts-1 {
 				return e
 			}
@@ -105,6 +115,7 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 			if d == 0 {
 				d = Backoff(i)
 			}
+			c.logFailedAttempt(method, logPath, i+1, "status", res.StatusCode)
 			if i == MaxAttempts-1 {
 				return fmt.Errorf("Blizzard HTTP %d", res.StatusCode)
 			}
@@ -118,6 +129,15 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 		return json.NewDecoder(res.Body).Decode(out)
 	}
 	return errors.New("Blizzard retries exhausted")
+}
+
+// logFailedAttempt records a retried HTTP failure at Debug level.
+func (c *Client) logFailedAttempt(method, path string, attempt int, args ...any) {
+	if c.Log == nil {
+		return
+	}
+	c.Log.Debug("blizzard request failed",
+		append([]any{"method", method, "path", path, "attempt", attempt}, args...)...)
 }
 func (c *Client) GuildRoster(ctx context.Context, realm, guild string) (dto.GuildRoster, error) {
 	var x dto.GuildRoster

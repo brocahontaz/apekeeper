@@ -31,8 +31,10 @@
 <h1>Keeper Controls</h1>
 <section class="controls">
   <h2>Guild expedition sync</h2>
-  {#if $currentUser?.appRole === "admin"}<button class="gold" disabled={busy} onclick={trigger}
-      >{busy ? "Dispatching…" : "Trigger full sync"}</button
+  {#if $currentUser?.appRole === "admin" || $currentUser?.appRole === "superadmin"}<button
+      class="gold"
+      disabled={busy}
+      onclick={trigger}>{busy ? "Dispatching…" : "Trigger full sync"}</button
     >{:else}<span title="Only Guild Masters can trigger a full sync"
       >Trigger restricted to Guild Master</span
     >{/if}

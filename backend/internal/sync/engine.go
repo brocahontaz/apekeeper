@@ -9,6 +9,7 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -16,8 +17,10 @@ import (
 const DefaultSeasonSlug = "current"
 
 type Engine struct {
-	Client  blizzard.BlizzardClient
-	Stores  store.Store
+	Client blizzard.BlizzardClient
+	Stores store.Store
+	// Log is optional; when nil the engine stays silent.
+	Log     *slog.Logger
 	Now     func() time.Time
 	Workers int
 }
@@ -36,7 +39,10 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 	if err != nil {
 		run.Status = domain.RunFailed
 		run.ErrorSummary = err.Error()
-		_ = e.Stores.SyncRuns.Finish(ctx, run)
+		if e.Log != nil {
+			e.Log.Error("guild roster sync failed", "guild", g.Slug, "name", g.Name, "error", err)
+		}
+		e.finish(ctx, run)
 		return run, err
 	}
 	run.Total = len(roster.Members)
@@ -60,6 +66,9 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 		if er != nil {
 			run.Failed++
 			details[m.Character.Name] = er.Error()
+			if e.Log != nil {
+				e.Log.Debug("character sync failed", "character", m.Character.Name, "error", er)
+			}
 		} else {
 			_ = c
 			run.Updated++
@@ -83,8 +92,17 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 		run.ErrorSummary = fmt.Sprintf("%d of %d characters failed", run.Failed, run.Total)
 		run.Detail, _ = json.Marshal(details)
 	}
-	err = e.Stores.SyncRuns.Finish(ctx, run)
+	err = e.finish(ctx, run)
 	return run, err
+}
+
+// finish persists the run outcome and surfaces a discarded store error at Warn.
+func (e Engine) finish(ctx context.Context, run store.SyncRun) error {
+	err := e.Stores.SyncRuns.Finish(ctx, run)
+	if err != nil && e.Log != nil {
+		e.Log.Warn("sync run finish failed", "runId", run.ID, "error", err)
+	}
+	return err
 }
 func (e Engine) syncCharacter(
 	ctx context.Context,

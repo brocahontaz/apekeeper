@@ -59,9 +59,9 @@ func New(a API) http.Handler {
 	m.Handle("GET /api/roster", a.requireAuth(http.HandlerFunc(a.roster)))
 	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
 	m.Handle("GET /api/sync/runs",
-		a.requireRole([]string{"admin", "officer"}, http.HandlerFunc(a.syncRuns)))
+		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
 	m.Handle("POST /api/sync/run",
-		a.requireRole([]string{"admin"}, http.HandlerFunc(a.triggerSync)))
+		a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.triggerSync)))
 	return spa(m, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {

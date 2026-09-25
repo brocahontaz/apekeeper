@@ -144,6 +144,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
 	member := seedSession(t, ctx, pool, stores, "member", "member")
 	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
+	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin")
 	h := New(API{
 		Stores:    stores,
 		Auth:      manager,
@@ -180,6 +181,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 			decodeBody(t, r).(map[string]any)["runId"] != float64(42) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
+		assertStatus(t, h, http.MethodPost, "/api/sync/run", superadmin, http.StatusAccepted)
 	})
 	t.Run("sync history roles", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/sync/runs", member, http.StatusForbidden)
@@ -189,6 +191,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
 		assertStatus(t, h, http.MethodGet, "/api/sync/runs", admin, http.StatusOK)
+		assertStatus(t, h, http.MethodGet, "/api/sync/runs", superadmin, http.StatusOK)
 	})
 	t.Run("dashboard aggregates seeded data", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/dashboard", "", http.StatusUnauthorized)
@@ -272,7 +275,7 @@ func seedCharacter(
 func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores store.Store, name, role string) string {
 	t.Helper()
 	expires := time.Now().Add(time.Hour)
-	u, err := stores.Users.UpsertBattleNetUser(ctx, name, name, "", "", expires)
+	u, err := stores.Users.UpsertBattleNetUser(ctx, name, name, "", "", expires, false)
 	if err != nil {
 		t.Fatal(err)
 	}

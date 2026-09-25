@@ -12,7 +12,7 @@ Copy the example environment file and set the required values:
 cp .env.example .env
 ```
 
-`GUILD_REALM` is required (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth requires `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, and an OAuth application registration for the exact `OAUTH_REDIRECT_URL`. The default callback route is `http://localhost:8080/api/auth/callback` (`GET /api/auth/callback`).
+`GUILD_REALM` is required (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth requires `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, and an OAuth application registration for the exact `OAUTH_REDIRECT_URL`. The default callback route is `http://localhost:5173/api/auth/callback` (`GET /api/auth/callback`): the browser authenticates on the frontend origin and the Vite dev server proxies `/api` to the backend, so after sign-in you land on the SPA at `http://localhost:5173` rather than the backend port.
 
 ### Native backend and frontend
 
@@ -56,7 +56,7 @@ frontend/  Svelte 5/Vite control-room SPA
 docs/      operations and architecture notes
 ```
 
-Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks.
+Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks. The platform-level `superadmin` role has at least every admin capability and is granted at sign-in to BattleTags listed in the optional `SUPER_ADMIN_BATTLETAGS` variable (comma-separated, trimmed); it is intended for the repository or platform owner rather than the guild's actual GM, who holds the `admin` ("Guild Master") role.
 
 ## Tests
 
@@ -65,5 +65,7 @@ make test
 make check
 cd frontend && npm run test && npm run build
 ```
+
+For troubleshooting sync or API failures, set `LOG_LEVEL=debug` in the backend environment to enable structured sync and request debug logging on stdout.
 
 The schema is guild-scoped and ready for multi-guild support; the UI currently presents Ape Enclosure.

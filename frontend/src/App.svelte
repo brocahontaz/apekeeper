@@ -55,11 +55,13 @@
         <span>EXPEDITION LOG / {new Date().toLocaleDateString()}</span>{#if $currentUser}<span
             >{$currentUser.battletag}
             <b
-              >{$currentUser.appRole === "admin"
-                ? "Guild Master"
-                : $currentUser.appRole === "officer"
-                  ? "Officer"
-                  : "Member"}</b
+              >{$currentUser.appRole === "superadmin"
+                ? "Super Admin"
+                : $currentUser.appRole === "admin"
+                  ? "Guild Master"
+                  : $currentUser.appRole === "officer"
+                    ? "Officer"
+                    : "Member"}</b
             > <button onclick={logout}>Logout</button></span
           >{/if}
       </header>

@@ -7,8 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,9 +30,14 @@ type Manager struct {
 	Users       store.UserStore
 	RedirectURL string
 	Secret      []byte
-	Now         func() time.Time
-	mu          sync.Mutex
-	states      map[string]time.Time
+	// SuperAdminBattleTags optionally lists platform-level super admin
+	// BattleTags; a matching sign-in is stored with the superadmin role.
+	SuperAdminBattleTags []string
+	// Log is optional; when nil failures fall back to slog.Default().
+	Log    *slog.Logger
+	Now    func() time.Time
+	mu     sync.Mutex
+	states map[string]time.Time
 }
 
 func New(o OAuthClient, users store.UserStore, redirect string, secret []byte) *Manager {
@@ -51,6 +57,20 @@ func (m *Manager) now() time.Time {
 		return m.Now()
 	}
 	return time.Now()
+}
+func (m *Manager) logger() *slog.Logger {
+	if m.Log != nil {
+		return m.Log
+	}
+	return slog.Default()
+}
+func isSuperAdmin(tags []string, battletag string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(tag, battletag) {
+			return true
+		}
+	}
+	return false
 }
 func randomBytes(n int) []byte {
 	b := make([]byte, n)
@@ -91,12 +111,13 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := m.OAuth.ExchangeCode(r.Context(), code)
 	if err != nil {
-		log.Print("OAuth token exchange failed: ", err)
+		m.logger().Warn("OAuth token exchange failed", "error", err)
 		http.Error(w, "OAuth token exchange failed", http.StatusBadGateway)
 		return
 	}
 	p, err := m.OAuth.UserProfile(r.Context(), t.AccessToken)
 	if err != nil {
+		m.logger().Warn("OAuth profile fetch failed", "error", err)
 		http.Error(w, "OAuth profile fetch failed", http.StatusBadGateway)
 		return
 	}
@@ -107,6 +128,7 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 		t.AccessToken,
 		t.RefreshToken,
 		m.now().Add(time.Duration(t.ExpiresIn)*time.Second),
+		isSuperAdmin(m.SuperAdminBattleTags, p.BattleTag),
 	)
 	if err != nil {
 		http.Error(w, "could not save user", http.StatusInternalServerError)
