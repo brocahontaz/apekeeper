@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -82,6 +83,7 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := m.OAuth.ExchangeCode(r.Context(), code)
 	if err != nil {
+		log.Print("OAuth token exchange failed: ", err)
 		http.Error(w, "OAuth token exchange failed", http.StatusBadGateway)
 		return
 	}

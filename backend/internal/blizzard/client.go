@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,14 +29,15 @@ func (e *NotFoundError) Error() string { return "Blizzard resource not found: " 
 
 type Client struct {
 	Region, Locale, ClientID, ClientSecret string
+	Redirect                               string
 	HTTP                                   *http.Client
 	APIBase, OAuthBase                     string
 	limiter                                *Limiter
 	token                                  tokenCache
 }
 
-func NewClient(region, locale, id, secret string) *Client {
-	return &Client{Region: region, Locale: locale, ClientID: id, ClientSecret: secret, HTTP: &http.Client{Timeout: 20 * time.Second}, APIBase: "https://" + region + ".api.blizzard.com", OAuthBase: "https://oauth.battle.net", limiter: NewLimiter(0, 0, time.Second)}
+func NewClient(region, locale, id, secret, redirect string) *Client {
+	return &Client{Region: region, Locale: locale, ClientID: id, ClientSecret: secret, Redirect: redirect, HTTP: &http.Client{Timeout: 20 * time.Second}, APIBase: "https://" + region + ".api.blizzard.com", OAuthBase: "https://oauth.battle.net", limiter: NewLimiter(0, 0, time.Second)}
 }
 func (c *Client) get(ctx context.Context, path, namespace string, out any) error {
 	return c.request(ctx, http.MethodGet, c.APIBase+path, namespace, nil, out)
@@ -96,7 +98,8 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 			continue
 		}
 		if res.StatusCode/100 != 2 {
-			return fmt.Errorf("Blizzard HTTP %d", res.StatusCode)
+			b, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+			return fmt.Errorf("Blizzard HTTP %d: %s", res.StatusCode, b)
 		}
 		return json.NewDecoder(res.Body).Decode(out)
 	}

@@ -61,7 +61,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client := blizzard.NewClient(cfg.BlizzardRegion, cfg.BlizzardLocale, cfg.BlizzardClientID, cfg.BlizzardClientSecret)
+	client := blizzard.NewClient(cfg.BlizzardRegion, cfg.BlizzardLocale, cfg.BlizzardClientID, cfg.BlizzardClientSecret, cfg.OAuthRedirectURL)
 	service := &appsync.Service{Engine: appsync.Engine{Client: client, Stores: stores}, Guild: guild}
 	scheduler := sched.New(cfg.SyncSchedule, logg)
 	go scheduler.Run(ctx, func(c context.Context) { _, _ = service.Start(c, "scheduled") })
