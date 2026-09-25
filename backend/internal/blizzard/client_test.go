@@ -127,6 +127,38 @@ func TestGuildRosterUsesProfileNamespace(t *testing.T) {
 	}
 }
 
+func TestCharacterProgressionUsesProfileNamespace(t *testing.T) {
+	gotNamespaces := map[string]string{}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "test-token", ExpiresIn: 120})
+			return
+		}
+		gotNamespaces[r.URL.Path] = r.URL.Query().Get("namespace")
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer s.Close()
+	c := NewClient("eu", "en_GB", "", "", "")
+	defer c.limiter.Close()
+	c.APIBase = s.URL
+	c.OAuthBase = s.URL
+
+	if _, err := c.CharacterMythicPlusSeasonal(context.Background(), "Tarren Mill", "Ape Enclosure", "current"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CharacterRaids(context.Background(), "Tarren Mill", "Ape Enclosure"); err != nil {
+		t.Fatal(err)
+	}
+	for path, namespace := range gotNamespaces {
+		if namespace != "profile-eu" {
+			t.Errorf("namespace for %s = %q, want profile-eu", path, namespace)
+		}
+	}
+	if len(gotNamespaces) != 2 {
+		t.Fatalf("progression requests=%d, want 2", len(gotNamespaces))
+	}
+}
+
 func TestTokenCacheReusesValidToken(t *testing.T) {
 	calls := 0
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
