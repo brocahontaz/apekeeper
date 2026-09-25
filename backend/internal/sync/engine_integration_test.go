@@ -71,7 +71,11 @@ func (f fakeClient) CharacterRaids(_ context.Context, _, n string) (dto.Raids, e
 }
 
 func TestEngineCapturesProfileWhenProgressionIsNotFound(t *testing.T) {
-	e, s, g := testEngine(t, fakeClient{ilvl: 600, mythicErr: &blizzard.NotFoundError{URL: "mythic"}, raidsErr: &blizzard.NotFoundError{URL: "raids"}})
+	e, s, g := testEngine(t, fakeClient{
+		ilvl:      600,
+		mythicErr: &blizzard.NotFoundError{URL: "mythic"},
+		raidsErr:  &blizzard.NotFoundError{URL: "raids"},
+	})
 	r, err := e.RunGuildSync(context.Background(), g, "manual")
 	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 || r.Failed != 0 {
 		t.Fatalf("run=%+v err=%v", r, err)
@@ -82,7 +86,8 @@ func TestEngineCapturesProfileWhenProgressionIsNotFound(t *testing.T) {
 	}
 	for _, c := range chars {
 		d, err := s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
-		if err != nil || len(d.Mythic) != 0 || len(d.Raids) != 0 || len(d.Snapshots) != 1 || d.Snapshots[0].MythicRating != 0 || d.Snapshots[0].BestKeyLevel != 0 {
+		if err != nil || len(d.Mythic) != 0 || len(d.Raids) != 0 ||
+			len(d.Snapshots) != 1 || d.Snapshots[0].MythicRating != 0 || d.Snapshots[0].BestKeyLevel != 0 {
 			t.Fatalf("detail=%+v err=%v", d, err)
 		}
 	}
@@ -105,11 +110,15 @@ func TestEngineCapturesProfileOnProgressionFailure(t *testing.T) {
 		}
 	}
 }
-func (fakeClient) ExchangeCode(context.Context, string) (dto.Token, error) { return dto.Token{}, nil }
+func (fakeClient) ExchangeCode(context.Context, string) (dto.Token, error) {
+	return dto.Token{}, nil
+}
 func (fakeClient) UserProfile(context.Context, string) (dto.UserProfile, error) {
 	return dto.UserProfile{}, nil
 }
-func (fakeClient) AuthorizationURL(string, string) string { return "" }
+func (fakeClient) AuthorizationURL(string, string) string {
+	return ""
+}
 
 var _ blizzard.BlizzardClient = fakeClient{}
 
@@ -117,11 +126,23 @@ func testEngine(t *testing.T, f fakeClient) (Engine, store.Store, domain.Guild) 
 	t.Helper()
 	p, _ := testdb.New(t)
 	s := store.New(p)
-	g, err := s.Guilds.EnsureGuild(context.Background(), domain.Guild{Slug: "sync-test", Name: "Ape", Realm: "Area 52", Region: "us"})
+	g, err := s.Guilds.EnsureGuild(context.Background(), domain.Guild{
+		Slug:   "sync-test",
+		Name:   "Ape",
+		Realm:  "Area 52",
+		Region: "us",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Engine{Client: f, Stores: s, Workers: 1, Now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }}, s, g
+	return Engine{
+		Client:  f,
+		Stores:  s,
+		Workers: 1,
+		Now: func() time.Time {
+			return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+	}, s, g
 }
 func TestEnginePersistsSyncAndChangedSnapshots(t *testing.T) {
 	e, s, g := testEngine(t, fakeClient{rating: 100, ilvl: 600})

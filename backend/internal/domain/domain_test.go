@@ -25,7 +25,10 @@ func TestSnapshotsAndTransitions(t *testing.T) {
 	if SnapshotChanged(a, a) || !SnapshotChanged(a, Snapshot{ItemLevel: 2}) {
 		t.Fatal("snapshot")
 	}
-	if !Transition(RunRunning, RunSuccess) || Transition(RunSuccess, RunFailed) || Outcome(1, 1) != RunPartial || Outcome(0, 1) != RunFailed {
+	if !Transition(RunRunning, RunSuccess) ||
+		Transition(RunSuccess, RunFailed) ||
+		Outcome(1, 1) != RunPartial ||
+		Outcome(0, 1) != RunFailed {
 		t.Fatal("transition")
 	}
 }

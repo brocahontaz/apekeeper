@@ -100,7 +100,9 @@ func TestExchangeCodeSendsRedirectURI(t *testing.T) {
 	if _, err := c.ExchangeCode(context.Background(), "code"); err != nil {
 		t.Fatal(err)
 	}
-	if form.Get("redirect_uri") != "https://example.test/callback" || form.Get("code") != "code" || form.Get("grant_type") != "authorization_code" {
+	if form.Get("redirect_uri") != "https://example.test/callback" ||
+		form.Get("code") != "code" ||
+		form.Get("grant_type") != "authorization_code" {
 		t.Fatalf("form=%v", form)
 	}
 }
@@ -115,7 +117,9 @@ func TestExchangeCodeSurfacesErrorBody(t *testing.T) {
 	defer c.limiter.Close()
 	c.OAuthBase = s.URL
 	_, err := c.ExchangeCode(context.Background(), "bad")
-	if err == nil || !strings.Contains(err.Error(), "Blizzard HTTP 400") || !strings.Contains(err.Error(), "invalid_grant") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "Blizzard HTTP 400") ||
+		!strings.Contains(err.Error(), "invalid_grant") {
 		t.Fatalf("err=%v", err)
 	}
 }

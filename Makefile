@@ -1,4 +1,4 @@
-.PHONY: compose-up compose-down dev-up dev-down dev-logs migrate test test-unit lint build run frontend-install frontend-dev frontend-build frontend-test build-all check
+.PHONY: compose-up compose-down dev-up dev-down dev-logs migrate test test-unit lint build run frontend-install frontend-dev frontend-build frontend-test frontend-format build-all check
 compose-up:
 	docker compose up -d db
 compose-down:
@@ -26,9 +26,12 @@ frontend-build:
 	cd frontend && npm run build
 frontend-test:
 	cd frontend && npm run test
+frontend-format:
+	cd frontend && npm run format
 build-all: build
 check:
 	cd backend && test -z "$$(gofmt -l .)" && go vet ./...
 	cd frontend && npm run check
+	cd frontend && npm run format:check
 run:
 	cd backend && STATIC_DIR=$(CURDIR)/frontend/dist go run ./cmd/apekeeper

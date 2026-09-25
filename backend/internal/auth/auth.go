@@ -38,7 +38,13 @@ func New(o OAuthClient, users store.UserStore, redirect string, secret []byte) *
 	if len(secret) == 0 {
 		secret = randomBytes(32)
 	}
-	return &Manager{OAuth: o, Users: users, RedirectURL: redirect, Secret: secret, states: map[string]time.Time{}}
+	return &Manager{
+		OAuth:       o,
+		Users:       users,
+		RedirectURL: redirect,
+		Secret:      secret,
+		states:      map[string]time.Time{},
+	}
 }
 func (m *Manager) now() time.Time {
 	if m.Now != nil {
@@ -53,7 +59,9 @@ func randomBytes(n int) []byte {
 	}
 	return b
 }
-func token() string { return base64.RawURLEncoding.EncodeToString(randomBytes(32)) }
+func token() string {
+	return base64.RawURLEncoding.EncodeToString(randomBytes(32))
+}
 func (m *Manager) AuthorizationURL() string {
 	state := token()
 	m.mu.Lock()
@@ -92,7 +100,14 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "OAuth profile fetch failed", http.StatusBadGateway)
 		return
 	}
-	u, err := m.Users.UpsertBattleNetUser(r.Context(), formatID(p.ID), p.BattleTag, t.AccessToken, t.RefreshToken, m.now().Add(time.Duration(t.ExpiresIn)*time.Second))
+	u, err := m.Users.UpsertBattleNetUser(
+		r.Context(),
+		formatID(p.ID),
+		p.BattleTag,
+		t.AccessToken,
+		t.RefreshToken,
+		m.now().Add(time.Duration(t.ExpiresIn)*time.Second),
+	)
 	if err != nil {
 		http.Error(w, "could not save user", http.StatusInternalServerError)
 		return
@@ -106,7 +121,9 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, m.cookie(r, id, expires))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
-func formatID(id int64) string { return base64.RawURLEncoding.EncodeToString([]byte(stringInt(id))) }
+func formatID(id int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(stringInt(id)))
+}
 func stringInt(v int64) string {
 	if v == 0 {
 		return "0"
@@ -124,7 +141,15 @@ func (m *Manager) sign(id string) string {
 	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 }
 func (m *Manager) cookie(r *http.Request, id string, expires time.Time) *http.Cookie {
-	return &http.Cookie{Name: CookieName, Value: id + "." + m.sign(id), Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, Expires: expires}
+	return &http.Cookie{
+		Name:     CookieName,
+		Value:    id + "." + m.sign(id),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+		Expires:  expires,
+	}
 }
 func (m *Manager) sessionID(r *http.Request) (string, error) {
 	c, e := r.Cookie(CookieName)
@@ -155,6 +180,14 @@ func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) {
 	if id, e := m.sessionID(r); e == nil {
 		_ = m.Users.DeleteSession(r.Context(), id)
 	}
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{
+		Name:     CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

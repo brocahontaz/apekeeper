@@ -9,10 +9,40 @@ import (
 	"time"
 )
 
-type Config struct{ DatabaseURL, ServerPort, LogLevel, BlizzardClientID, BlizzardClientSecret, BlizzardRegion, BlizzardLocale, GuildName, GuildRealm, GuildRegion, SyncSchedule, OAuthRedirectURL, SessionSecret, StaticDir string }
+type Config struct {
+	DatabaseURL          string
+	ServerPort           string
+	LogLevel             string
+	BlizzardClientID     string
+	BlizzardClientSecret string
+	BlizzardRegion       string
+	BlizzardLocale       string
+	GuildName            string
+	GuildRealm           string
+	GuildRegion          string
+	SyncSchedule         string
+	OAuthRedirectURL     string
+	SessionSecret        string
+	StaticDir            string
+}
 
 func Load() (Config, error) {
-	c := Config{DatabaseURL: os.Getenv("DATABASE_URL"), ServerPort: env("SERVER_PORT", "8080"), LogLevel: env("LOG_LEVEL", "info"), BlizzardClientID: os.Getenv("BLIZZARD_CLIENT_ID"), BlizzardClientSecret: os.Getenv("BLIZZARD_CLIENT_SECRET"), BlizzardRegion: env("BLIZZARD_REGION", "us"), BlizzardLocale: env("BLIZZARD_LOCALE", "en_US"), GuildName: env("GUILD_NAME", "Ape Enclosure"), GuildRealm: os.Getenv("GUILD_REALM"), GuildRegion: env("GUILD_REGION", "us"), SyncSchedule: env("SYNC_SCHEDULE", "03:00"), OAuthRedirectURL: os.Getenv("OAUTH_REDIRECT_URL"), SessionSecret: os.Getenv("SESSION_SECRET"), StaticDir: os.Getenv("STATIC_DIR")}
+	c := Config{
+		DatabaseURL:          os.Getenv("DATABASE_URL"),
+		ServerPort:           env("SERVER_PORT", "8080"),
+		LogLevel:             env("LOG_LEVEL", "info"),
+		BlizzardClientID:     os.Getenv("BLIZZARD_CLIENT_ID"),
+		BlizzardClientSecret: os.Getenv("BLIZZARD_CLIENT_SECRET"),
+		BlizzardRegion:       env("BLIZZARD_REGION", "us"),
+		BlizzardLocale:       env("BLIZZARD_LOCALE", "en_US"),
+		GuildName:            env("GUILD_NAME", "Ape Enclosure"),
+		GuildRealm:           os.Getenv("GUILD_REALM"),
+		GuildRegion:          env("GUILD_REGION", "us"),
+		SyncSchedule:         env("SYNC_SCHEDULE", "03:00"),
+		OAuthRedirectURL:     os.Getenv("OAUTH_REDIRECT_URL"),
+		SessionSecret:        os.Getenv("SESSION_SECRET"),
+		StaticDir:            os.Getenv("STATIC_DIR"),
+	}
 
 	missing := make([]string, 0, 6)
 	for _, required := range []struct {
@@ -54,12 +84,16 @@ func Load() (Config, error) {
 
 func isPostgresURL(value string) bool {
 	u, err := url.Parse(value)
-	return err == nil && (strings.EqualFold(u.Scheme, "postgres") || strings.EqualFold(u.Scheme, "postgresql")) && u.Hostname() != ""
+	return err == nil &&
+		(strings.EqualFold(u.Scheme, "postgres") || strings.EqualFold(u.Scheme, "postgresql")) &&
+		u.Hostname() != ""
 }
 
 func isOAuthRedirectURL(value string) bool {
 	u, err := url.Parse(value)
-	return err == nil && (strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")) && u.Hostname() != ""
+	return err == nil &&
+		(strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")) &&
+		u.Hostname() != ""
 }
 
 func env(k, d string) string {

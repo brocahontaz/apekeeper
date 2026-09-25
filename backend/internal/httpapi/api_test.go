@@ -24,14 +24,23 @@ import (
 
 type oauthFake struct{}
 
-func (oauthFake) AuthorizationURL(_, _ string) string                     { return "" }
-func (oauthFake) ExchangeCode(context.Context, string) (dto.Token, error) { return dto.Token{}, nil }
+func (oauthFake) AuthorizationURL(_, _ string) string {
+	return ""
+}
+func (oauthFake) ExchangeCode(context.Context, string) (dto.Token, error) {
+	return dto.Token{}, nil
+}
 func (oauthFake) UserProfile(context.Context, string) (dto.UserProfile, error) {
 	return dto.UserProfile{}, nil
 }
 
 func TestSPAFallbackDoesNotInterceptAPI(t *testing.T) {
-	h := New(API{Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")), Frontend: fstest.MapFS{"index.html": {Data: []byte("<main>ApeKeeper</main>")}}})
+	h := New(API{
+		Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")),
+		Frontend: fstest.MapFS{
+			"index.html": {Data: []byte("<main>ApeKeeper</main>")},
+		},
+	})
 	page := httptest.NewRecorder()
 	h.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/roster/42", nil))
 	if page.Code != http.StatusOK || page.Body.String() != "<main>ApeKeeper</main>" {
@@ -49,7 +58,10 @@ func TestSPAFallbackUsesStaticDir(t *testing.T) {
 	if err := os.WriteFile(dir+"/index.html", []byte("<main>static ApeKeeper</main>"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	h := New(API{Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")), StaticDir: dir})
+	h := New(API{
+		Auth:      auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")),
+		StaticDir: dir,
+	})
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/roster/42", nil))
 	if r.Code != http.StatusOK || r.Body.String() != "<main>static ApeKeeper</main>" {
@@ -84,13 +96,37 @@ func TestStoreBackedHandlers(t *testing.T) {
 	}
 	alpha := seedCharacter(t, ctx, stores, guild.ID, "Alpha", "Mage", now)
 	_ = seedCharacter(t, ctx, stores, guild.ID, "Beta", "Rogue", now)
-	if err := stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{CharacterID: alpha.ID, Season: "Season 1", SeasonSlug: "season-1", OverallRating: 2500, BestKeyLevel: 12, Dungeons: []byte("[]"), SyncedAt: now}); err != nil {
+	if err := stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
+		CharacterID:   alpha.ID,
+		Season:        "Season 1",
+		SeasonSlug:    "season-1",
+		OverallRating: 2500,
+		BestKeyLevel:  12,
+		Dungeons:      []byte("[]"),
+		SyncedAt:      now,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := stores.Progression.UpsertRaid(ctx, domain.RaidProgression{CharacterID: alpha.ID, RaidSlug: "raid", RaidName: "Raid", Difficulty: "heroic", Progress: 4, TotalBosses: 8, Summary: []byte("{}"), SyncedAt: now}); err != nil {
+	if err := stores.Progression.UpsertRaid(ctx, domain.RaidProgression{
+		CharacterID: alpha.ID,
+		RaidSlug:    "raid",
+		RaidName:    "Raid",
+		Difficulty:  "heroic",
+		Progress:    4,
+		TotalBosses: 8,
+		Summary:     []byte("{}"),
+		SyncedAt:    now,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{CharacterID: alpha.ID, CapturedAt: now, ItemLevel: 620, MythicRating: 2500, BestKeyLevel: 12, RaidProgress: []byte("[]")}); err != nil {
+	if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{
+		CharacterID:  alpha.ID,
+		CapturedAt:   now,
+		ItemLevel:    620,
+		MythicRating: 2500,
+		BestKeyLevel: 12,
+		RaidProgress: []byte("[]"),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	run, err := stores.SyncRuns.Create(ctx, guild.ID, "manual")
@@ -108,7 +144,17 @@ func TestStoreBackedHandlers(t *testing.T) {
 	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
 	member := seedSession(t, ctx, pool, stores, "member", "member")
 	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
-	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Now: func() time.Time { return now }, Trigger: TriggerFunc(func(context.Context) (int64, error) { return 42, nil })})
+	h := New(API{
+		Stores:    stores,
+		Auth:      manager,
+		GuildSlug: guild.Slug,
+		Now: func() time.Time {
+			return now
+		},
+		Trigger: TriggerFunc(func(context.Context) (int64, error) {
+			return 42, nil
+		}),
+	})
 
 	t.Run("roster requires authentication", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/roster", "", http.StatusUnauthorized)
@@ -130,14 +176,16 @@ func TestStoreBackedHandlers(t *testing.T) {
 		assertStatus(t, h, http.MethodPost, "/api/sync/run", member, http.StatusForbidden)
 		assertStatus(t, h, http.MethodPost, "/api/sync/run", officer, http.StatusForbidden)
 		r := request(h, http.MethodPost, "/api/sync/run", admin)
-		if r.Code != http.StatusAccepted || decodeBody(t, r).(map[string]any)["runId"] != float64(42) {
+		if r.Code != http.StatusAccepted ||
+			decodeBody(t, r).(map[string]any)["runId"] != float64(42) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
 	})
 	t.Run("sync history roles", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/sync/runs", member, http.StatusForbidden)
 		r := request(h, http.MethodGet, "/api/sync/runs", officer)
-		if r.Code != http.StatusOK || decodeBody(t, r).([]any)[0].(map[string]any)["updated"] != float64(7) {
+		if r.Code != http.StatusOK ||
+			decodeBody(t, r).([]any)[0].(map[string]any)["updated"] != float64(7) {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
 		assertStatus(t, h, http.MethodGet, "/api/sync/runs", admin, http.StatusOK)
@@ -169,7 +217,10 @@ func TestStoreBackedHandlers(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/characters/"+intString(alpha.ID), "", http.StatusUnauthorized)
 		r := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID), member)
 		body := decodeBody(t, r).(map[string]any)
-		if r.Code != http.StatusOK || len(body["mythicPlus"].([]any)) == 0 || len(body["raidProgression"].([]any)) == 0 || len(body["snapshots"].([]any)) == 0 {
+		if r.Code != http.StatusOK ||
+			len(body["mythicPlus"].([]any)) == 0 ||
+			len(body["raidProgression"].([]any)) == 0 ||
+			len(body["snapshots"].([]any)) == 0 {
 			t.Fatalf("status=%d character=%v", r.Code, body)
 		}
 		assertStatus(t, h, http.MethodGet, "/api/characters/999999", member, http.StatusNotFound)
@@ -187,9 +238,31 @@ func TestStoreBackedHandlers(t *testing.T) {
 	})
 }
 
-func seedCharacter(t *testing.T, ctx context.Context, stores store.Store, guildID int64, name, class string, now time.Time) domain.Character {
+func seedCharacter(
+	t *testing.T,
+	ctx context.Context,
+	stores store.Store,
+	guildID int64,
+	name, class string,
+	now time.Time,
+) domain.Character {
 	t.Helper()
-	c, err := stores.Characters.UpsertByGuildIdentity(ctx, domain.Character{GuildID: guildID, Name: name, DisplayName: name, NormalizedName: domain.NormalizeCharacterName(name), Realm: "Area 52", RealmSlug: "area-52", Region: "us", ClassID: 8, ClassName: class, SpecID: 62, SpecName: "Arcane", Level: 70, ItemLevel: 620, SyncedAt: now}, []byte("{}"))
+	c, err := stores.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        guildID,
+		Name:           name,
+		DisplayName:    name,
+		NormalizedName: domain.NormalizeCharacterName(name),
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		ClassID:        8,
+		ClassName:      class,
+		SpecID:         62,
+		SpecName:       "Arcane",
+		Level:          70,
+		ItemLevel:      620,
+		SyncedAt:       now,
+	}, []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
