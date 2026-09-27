@@ -18,8 +18,11 @@ type BlizzardClient interface {
 	GuildRoster(context.Context, string, string) (dto.GuildRoster, error)
 	CharacterProfileSummary(context.Context, string, string) (dto.ProfileSummary, error)
 	CharacterMythicPlusSeasonal(context.Context, string, string, string) (dto.MythicPlus, error)
+	CharacterMythicPlusProfile(context.Context, string, string) (dto.MythicPlusProfileIndex, error)
 	CharacterRaids(context.Context, string, string) (dto.Raids, error)
 	CharacterMedia(context.Context, string, string) (dto.CharacterMedia, error)
+	MythicKeystoneSeasonIndex(context.Context) (dto.MythicKeystoneSeasonIndex, error)
+	JournalExpansionIndex(context.Context) (dto.JournalExpansionIndex, error)
 	ExchangeCode(context.Context, string) (dto.Token, error)
 	UserProfile(context.Context, string) (dto.UserProfile, error)
 	AuthorizationURL(string, string) string
@@ -163,6 +166,14 @@ func (c *Client) CharacterMythicPlusSeasonal(ctx context.Context, realm, name, s
 		&x,
 	)
 }
+func (c *Client) CharacterMythicPlusProfile(ctx context.Context, realm, name string) (dto.MythicPlusProfileIndex, error) {
+	var x dto.MythicPlusProfileIndex
+	return x, c.get(ctx,
+		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/mythic-keystone-profile",
+		ProfileNamespace(c.Region),
+		&x,
+	)
+}
 func (c *Client) CharacterRaids(ctx context.Context, realm, name string) (dto.Raids, error) {
 	var x dto.Raids
 	return x, c.get(ctx,
@@ -176,6 +187,22 @@ func (c *Client) CharacterMedia(ctx context.Context, realm, name string) (dto.Ch
 	return x, c.get(ctx,
 		"/profile/wow/character/"+RealmSlug(realm)+"/"+Slug(name)+"/character-media",
 		ProfileNamespace(c.Region),
+		&x,
+	)
+}
+func (c *Client) MythicKeystoneSeasonIndex(ctx context.Context) (dto.MythicKeystoneSeasonIndex, error) {
+	var x dto.MythicKeystoneSeasonIndex
+	return x, c.get(ctx,
+		"/data/wow/mythic-keystone/season/index",
+		DynamicNamespace(c.Region),
+		&x,
+	)
+}
+func (c *Client) JournalExpansionIndex(ctx context.Context) (dto.JournalExpansionIndex, error) {
+	var x dto.JournalExpansionIndex
+	return x, c.get(ctx,
+		"/data/wow/journal-expansion/index",
+		StaticNamespace(c.Region),
 		&x,
 	)
 }

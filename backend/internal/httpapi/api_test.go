@@ -107,13 +107,20 @@ func TestStoreBackedHandlers(t *testing.T) {
 		Season:        "Season 1",
 		SeasonSlug:    "season-1",
 		OverallRating: 2500,
+		BestRunScore:  315,
 		BestKeyLevel:  12,
-		Dungeons:      []byte("[]"),
-		SyncedAt:      now,
+		Runs: &domain.MythicRuns{Best: []domain.MythicRun{{
+			Dungeon:     "The Rookery",
+			Level:       12,
+			Score:       315,
+			Timed:       true,
+			CompletedAt: 1700000000000,
+		}}},
+		SyncedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := stores.Progression.UpsertRaid(ctx, domain.RaidProgression{
+	if err := stores.Progression.ReplaceRaids(ctx, alpha.ID, []domain.RaidProgression{{
 		CharacterID: alpha.ID,
 		RaidSlug:    "raid",
 		RaidName:    "Raid",
@@ -122,7 +129,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 		TotalBosses: 8,
 		Summary:     []byte("{}"),
 		SyncedAt:    now,
-	}); err != nil {
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{
@@ -276,6 +283,11 @@ func TestStoreBackedHandlers(t *testing.T) {
 		mythic := body["mythicPlus"].([]any)[0].(map[string]any)
 		if mythic["overallRating"] != float64(2500) || mythic["seasonSlug"] != "season-1" {
 			t.Fatalf("mythicPlus=%v", mythic)
+		}
+		runs, ok := mythic["runs"].(map[string]any)
+		if !ok || len(runs["best"].([]any)) != 1 ||
+			runs["best"].([]any)[0].(map[string]any)["dungeon"] != "The Rookery" {
+			t.Fatalf("mythicPlus runs=%v, want one best entry", mythic["runs"])
 		}
 		raid := body["raidProgression"].([]any)[0].(map[string]any)
 		if raid["raidName"] != "Raid" || raid["difficulty"] != "heroic" ||

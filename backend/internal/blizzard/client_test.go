@@ -149,6 +149,9 @@ func TestCharacterProgressionUsesProfileNamespace(t *testing.T) {
 	if _, err := c.CharacterMythicPlusSeasonal(context.Background(), "Tarren Mill", "Ape Enclosure", "current"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := c.CharacterMythicPlusProfile(context.Background(), "Tarren Mill", "Ape Enclosure"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.CharacterRaids(context.Background(), "Tarren Mill", "Ape Enclosure"); err != nil {
 		t.Fatal(err)
 	}
@@ -157,8 +160,38 @@ func TestCharacterProgressionUsesProfileNamespace(t *testing.T) {
 			t.Errorf("namespace for %s = %q, want profile-eu", path, namespace)
 		}
 	}
-	if len(gotNamespaces) != 2 {
-		t.Fatalf("progression requests=%d, want 2", len(gotNamespaces))
+	if len(gotNamespaces) != 3 {
+		t.Fatalf("progression requests=%d, want 3", len(gotNamespaces))
+	}
+}
+
+func TestDataEndpointsUseGameNamespaces(t *testing.T) {
+	gotNamespaces := map[string]string{}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(dto.Token{AccessToken: "test-token", ExpiresIn: 120})
+			return
+		}
+		gotNamespaces[r.URL.Path] = r.URL.Query().Get("namespace")
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer s.Close()
+	c := NewClient("eu", "en_GB", "", "", "")
+	defer c.limiter.Close()
+	c.APIBase = s.URL
+	c.OAuthBase = s.URL
+
+	if _, err := c.MythicKeystoneSeasonIndex(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.JournalExpansionIndex(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if namespace := gotNamespaces["/data/wow/mythic-keystone/season/index"]; namespace != "dynamic-eu" {
+		t.Fatalf("season index namespace=%q, want dynamic-eu", namespace)
+	}
+	if namespace := gotNamespaces["/data/wow/journal-expansion/index"]; namespace != "static-eu" {
+		t.Fatalf("journal expansion namespace=%q, want static-eu", namespace)
 	}
 }
 

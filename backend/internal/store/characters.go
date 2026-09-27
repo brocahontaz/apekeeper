@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -153,12 +154,21 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 	defer rows.Close()
 	for rows.Next() {
 		var x domain.MythicPlus
+		var runs []byte
 		x.CharacterID = id
 		if err = rows.Scan(
 			&x.Season, &x.SeasonSlug, &x.OverallRating,
-			&x.BestKeyLevel, &x.BestRunScore, &x.Dungeons, &x.SyncedAt,
+			&x.BestKeyLevel, &x.BestRunScore, &runs, &x.SyncedAt,
 		); err != nil {
 			return d, err
+		}
+		// Legacy rows store no runs snapshot; a null or unmarshalable value
+		// must never fail the detail read, so Runs simply stays nil.
+		if len(runs) > 0 {
+			var parsed domain.MythicRuns
+			if json.Unmarshal(runs, &parsed) == nil && (parsed.Best != nil || parsed.Recent != nil) {
+				x.Runs = &parsed
+			}
 		}
 		d.Mythic = append(d.Mythic, x)
 	}

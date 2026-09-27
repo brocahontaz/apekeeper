@@ -294,6 +294,19 @@ small {
   padding: 10px 0;
   font-size: 12px;
 }
+.runs-group small,
+.runs-box small {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+.runs-box {
+  border: 1px solid #866c39;
+  background: #24352b;
+  padding: 2px 12px 8px;
+  margin: 8px 0 12px;
+}
 .character {
   display: flex;
   gap: 16px;

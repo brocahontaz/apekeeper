@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -9,7 +10,13 @@ import (
 type ProgressionStore struct{ pool *pgxpool.Pool }
 
 func (s ProgressionStore) UpsertMythicPlus(ctx context.Context, m domain.MythicPlus) error {
-	_, e := s.pool.Exec(ctx, `INSERT INTO mythic_plus(
+	// The runs snapshot rides in the legacy dungeons jsonb column; a nil
+	// pointer marshals to null.
+	runs, e := json.Marshal(m.Runs)
+	if e != nil {
+		return e
+	}
+	_, e = s.pool.Exec(ctx, `INSERT INTO mythic_plus(
 		character_id,season,season_slug,overall_rating,best_key_level,best_run_score,dungeons,synced_at
 	)
 	VALUES($1,$2,$3,$4,$5,$6,$7,$8)
@@ -20,23 +27,55 @@ func (s ProgressionStore) UpsertMythicPlus(ctx context.Context, m domain.MythicP
 		dungeons=EXCLUDED.dungeons,
 		synced_at=EXCLUDED.synced_at`,
 		m.CharacterID, m.Season, m.SeasonSlug, m.OverallRating,
-		m.BestKeyLevel, m.BestRunScore, m.Dungeons, m.SyncedAt)
+		m.BestKeyLevel, m.BestRunScore, runs, m.SyncedAt)
 	return e
 }
 
-func (s ProgressionStore) UpsertRaid(ctx context.Context, r domain.RaidProgression) error {
-	_, e := s.pool.Exec(ctx, `INSERT INTO raid_progression(
-		character_id,raid_slug,raid_name,difficulty,progress,total_bosses,summary,synced_at
+// UpsertMythicPlusRuns refreshes only the run lists for a season, leaving a
+// previously stored rating summary untouched when the row already exists.
+func (s ProgressionStore) UpsertMythicPlusRuns(ctx context.Context, m domain.MythicPlus) error {
+	runs, e := json.Marshal(m.Runs)
+	if e != nil {
+		return e
+	}
+	_, e = s.pool.Exec(ctx, `INSERT INTO mythic_plus(
+		character_id,season,season_slug,overall_rating,best_key_level,best_run_score,dungeons,synced_at
 	)
 	VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-	ON CONFLICT(character_id,raid_slug,difficulty) DO UPDATE SET
-		progress=EXCLUDED.progress,
-		total_bosses=EXCLUDED.total_bosses,
-		summary=EXCLUDED.summary,
+	ON CONFLICT(character_id,season_slug) DO UPDATE SET
+		season=EXCLUDED.season,
+		dungeons=EXCLUDED.dungeons,
 		synced_at=EXCLUDED.synced_at`,
-		r.CharacterID, r.RaidSlug, r.RaidName, r.Difficulty,
-		r.Progress, r.TotalBosses, r.Summary, r.SyncedAt)
+		m.CharacterID, m.Season, m.SeasonSlug, m.OverallRating,
+		m.BestKeyLevel, m.BestRunScore, runs, m.SyncedAt)
 	return e
+}
+
+// ReplaceRaids atomically swaps a character's stored raid progression: every
+// existing row is removed and the given rows are inserted in one transaction,
+// so a failed swap never wipes a character's progression data.
+func (s ProgressionStore) ReplaceRaids(ctx context.Context, characterID int64, raids []domain.RaidProgression) error {
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	// Rollback through a fresh context so a cancelled caller cannot strand the
+	// transaction's connection.
+	defer tx.Rollback(context.Background())
+	if _, e = tx.Exec(ctx, `DELETE FROM raid_progression WHERE character_id=$1`, characterID); e != nil {
+		return e
+	}
+	for _, r := range raids {
+		if _, e = tx.Exec(ctx, `INSERT INTO raid_progression(
+			character_id,raid_slug,raid_name,difficulty,progress,total_bosses,summary,synced_at
+		)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+			r.CharacterID, r.RaidSlug, r.RaidName, r.Difficulty,
+			r.Progress, r.TotalBosses, r.Summary, r.SyncedAt); e != nil {
+			return e
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s ProgressionStore) LastSnapshot(ctx context.Context, id int64) (domain.Snapshot, error) {

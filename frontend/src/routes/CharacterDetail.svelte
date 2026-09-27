@@ -1,11 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { client, type Character } from "$lib/api";
+  import { client, type Character, type MythicRun } from "$lib/api";
   import { classColor } from "$lib/theme";
   import { relativeTime } from "$lib/format";
   let { name }: { name: string } = $props();
   let character = $state<Character | null>(null);
   let error = $state("");
+  type MythicRow = {
+    season?: string;
+    overallRating: number;
+    bestKeyLevel: number;
+    runs?: { best?: MythicRun[]; recent?: MythicRun[] };
+  };
   onMount(async () => {
     try {
       character = await client.character(name);
@@ -13,6 +19,16 @@
       error = e instanceof Error ? e.message : "Character unavailable";
     }
   });
+  // The season payload repeats a dungeon once per timed and untimed attempt;
+  // keep only the highest score per dungeon for the best-runs view.
+  function bestByDungeon(runs: MythicRun[] | undefined): MythicRun[] {
+    const top = new Map<string, MythicRun>();
+    for (const r of runs ?? []) {
+      const kept = top.get(r.dungeon);
+      if (!kept || r.score > kept.score) top.set(r.dungeon, r);
+    }
+    return [...top.values()].sort((a, b) => b.score - a.score);
+  }
 </script>
 
 <a href="/roster">← Roster</a>{#if error}<p class="error">{error}</p>{:else if !character}<p
@@ -44,11 +60,29 @@
   <div class="grid">
     <section>
       <h2>Mythic+ stats</h2>
-      {#each (character.mythicPlus as any[]) ?? [] as m}<div class="progression-row">
+      {#each (character.mythicPlus as MythicRow[]) ?? [] as m}<div class="progression-row">
           <strong>{m.season || "Current season"}</strong><span
             >Rating <b>{Math.round(m.overallRating).toLocaleString()}</b></span
           ><span>Best key <b>+{m.bestKeyLevel}</b></span>
-        </div>{:else}<p>No keystones recorded.</p>{/each}
+        </div>
+        {#if m.runs?.best?.length}<div class="runs-group">
+            <small>Best runs</small>
+            {#each bestByDungeon(m.runs?.best) as r}<div class="progression-row">
+                <strong>{r.dungeon}</strong><span>+{r.level}</span><span
+                  >Score <b>{Math.round(r.score).toLocaleString()}</b></span
+                ><span>{r.timed ? "timed" : "over time"}</span>
+              </div>{/each}
+          </div>
+        {/if}
+        {#if m.runs?.recent?.length}<div class="runs-box">
+            <small>Latest runs</small>
+            {#each m.runs.recent as r}<div class="progression-row">
+                <strong>{r.dungeon}</strong><span>+{r.level}</span><span
+                  >{r.timed ? "timed" : "over time"}</span
+                ><span>{relativeTime(new Date(r.completedAt))}</span>
+              </div>{/each}
+          </div>
+        {/if}{:else}<p>No keystones recorded.</p>{/each}
     </section>
     <section>
       <h2>Raid stats</h2>
@@ -57,7 +91,7 @@
             ><progress value={r.progress} max={r.totalBosses}></progress>
             {r.progress}/{r.totalBosses}</span
           >
-        </div>{:else}<p>No raid records.</p>{/each}
+        </div>{:else}<p>No progression in the current tier.</p>{/each}
     </section>
     <section>
       <h2>Progression history</h2>
