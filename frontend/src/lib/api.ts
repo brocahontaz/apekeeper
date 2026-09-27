@@ -24,6 +24,13 @@ export type Character = {
   stale: boolean;
   [key: string]: unknown;
 };
+export type MythicRun = {
+  dungeon: string;
+  level: number;
+  score: number;
+  timed: boolean;
+  completedAt: number;
+};
 export type RosterPage = {
   items: Character[];
   total: number;

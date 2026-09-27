@@ -10,11 +10,12 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 	"log/slog"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
-
-const DefaultSeasonSlug = "current"
 
 type Engine struct {
 	Client blizzard.BlizzardClient
@@ -23,6 +24,67 @@ type Engine struct {
 	Log     *slog.Logger
 	Now     func() time.Time
 	Workers int
+}
+
+// TierAnchor pins a guild sync to the season and expansion that are current
+// when the run starts, so every character records the same tier.
+type TierAnchor struct {
+	SeasonID    int
+	SeasonName  string
+	ExpansionID int
+}
+
+// resolveTierAnchor looks up the current season and expansion once per run.
+// Unavailable indexes degrade gracefully: SeasonID 0 skips mythic+ for the
+// run and ExpansionID 0 keeps every raid expansion (previous behavior).
+func (e Engine) resolveTierAnchor(ctx context.Context) TierAnchor {
+	var a TierAnchor
+	if seasons, err := e.Client.MythicKeystoneSeasonIndex(ctx); err != nil {
+		if e.Log != nil {
+			e.Log.Warn("season index unavailable", "error", err)
+		}
+	} else {
+		a.SeasonID = seasons.CurrentSeason.ID
+		a.SeasonName = seasons.CurrentSeason.Name
+		if a.SeasonID == 0 {
+			for _, s := range seasons.Seasons {
+				if s.ID > a.SeasonID {
+					a.SeasonID = s.ID
+				}
+			}
+		}
+	}
+	if journal, err := e.Client.JournalExpansionIndex(ctx); err != nil {
+		if e.Log != nil {
+			e.Log.Warn("expansion index unavailable", "error", err)
+		}
+	} else {
+		// The journal index repeats current content as a pseudo tier named
+		// "Current Season"; it shares the real expansion's ID space and must
+		// not win the max.
+		for _, t := range journal.Tiers {
+			if t.Name == "Current Season" {
+				continue
+			}
+			if t.ID > a.ExpansionID {
+				a.ExpansionID = t.ID
+			}
+		}
+		if a.ExpansionID == 0 && e.Log != nil {
+			e.Log.Warn("expansion index unavailable")
+		}
+	}
+	return a
+}
+
+// SeasonDisplayName extracts the season name from the journal-style
+// "Mythic+ Dungeons (X)" label, leaving any other name untouched.
+func SeasonDisplayName(name string) string {
+	const label = "Mythic+ Dungeons ("
+	if strings.HasPrefix(name, label) && strings.HasSuffix(name, ")") {
+		return strings.TrimSuffix(strings.TrimPrefix(name, label), ")")
+	}
+	return name
 }
 
 func (e Engine) RunGuildSync(ctx context.Context, g domain.Guild, trigger string) (store.SyncRun, error) {
@@ -50,6 +112,7 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 	if e.Now != nil {
 		now = e.Now()
 	}
+	anchor := e.resolveTierAnchor(ctx)
 	workers := e.Workers
 	if workers <= 0 {
 		workers = 8
@@ -60,7 +123,7 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 	var wg sync.WaitGroup
 	work := func(m dto.RosterMember) {
 		defer wg.Done()
-		c, er := e.syncCharacter(ctx, g, m, now)
+		c, er := e.syncCharacter(ctx, g, m, anchor, now)
 		mu.Lock()
 		defer mu.Unlock()
 		if er != nil {
@@ -108,6 +171,7 @@ func (e Engine) syncCharacter(
 	ctx context.Context,
 	g domain.Guild,
 	m dto.RosterMember,
+	anchor TierAnchor,
 	now time.Time,
 ) (domain.Character, error) {
 	p, err := e.Client.CharacterProfileSummary(ctx, m.Character.Realm.Slug, m.Character.Name)
@@ -155,30 +219,105 @@ func (e Engine) syncCharacter(
 			}
 		}
 	}
-	season := DefaultSeasonSlug
-	mp, err := e.Client.CharacterMythicPlusSeasonal(ctx, m.Character.Realm.Slug, m.Character.Name, season)
+	var mp dto.MythicPlus
 	best := 0
+	var bestScore float64
+	var bestRuns, recentRuns []domain.MythicRun
 	var progressionErr error
-	if err != nil {
-		if !isNotFound(err) {
-			progressionErr = err
-		} else if e.Log != nil {
-			e.Log.Debug("mythic keystone profile not found", "character", c.Name)
-		}
-	} else {
-		for _, r := range mp.BestRuns {
-			if r.MythicLevel > best {
-				best = r.MythicLevel
+	if anchor.SeasonID > 0 {
+		season := strconv.Itoa(anchor.SeasonID)
+		seasonFound, seasonMissing := false, false
+		response, err := e.Client.CharacterMythicPlusSeasonal(ctx, m.Character.Realm.Slug, m.Character.Name, season)
+		if err != nil {
+			if !isNotFound(err) {
+				progressionErr = err
+			} else {
+				seasonMissing = true
+				if e.Log != nil {
+					e.Log.Debug("mythic keystone profile not found", "character", c.Name)
+				}
 			}
+		} else {
+			seasonFound = true
+			mp = response
+			for _, r := range response.BestRuns {
+				bestRuns = append(bestRuns, domain.MythicRun{
+					Dungeon:     r.Dungeon.Name,
+					Level:       r.KeystoneLevel,
+					Score:       r.MythicRating.Rating,
+					Timed:       r.Completed,
+					CompletedAt: r.CompletedTimestamp,
+				})
+				if r.KeystoneLevel > best {
+					best = r.KeystoneLevel
+				}
+				if r.MythicRating.Rating > bestScore {
+					bestScore = r.MythicRating.Rating
+				}
+			}
+			sort.Slice(bestRuns, func(i, j int) bool {
+				if bestRuns[i].Score != bestRuns[j].Score {
+					return bestRuns[i].Score > bestRuns[j].Score
+				}
+				return bestRuns[i].Level > bestRuns[j].Level
+			})
 		}
-		if err = e.Stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
-			CharacterID:   c.ID,
-			SeasonSlug:    season,
-			OverallRating: mp.CurrentMythicRating.Rating,
-			BestKeyLevel:  best,
-			SyncedAt:      now,
-		}); err != nil {
-			progressionErr = err
+		// The index can still carry current-period runs when the season
+		// profile 404s, so it is fetched regardless of the season outcome.
+		index, err := e.Client.CharacterMythicPlusProfile(ctx, m.Character.Realm.Slug, m.Character.Name)
+		if err != nil {
+			if !isNotFound(err) {
+				if progressionErr == nil {
+					progressionErr = err
+				}
+			} else if e.Log != nil {
+				e.Log.Debug("mythic keystone profile index not found", "character", c.Name)
+			}
+		} else {
+			for _, r := range index.CurrentPeriod.BestRuns {
+				recentRuns = append(recentRuns, domain.MythicRun{
+					Dungeon:     r.Dungeon.Name,
+					Level:       r.KeystoneLevel,
+					Score:       r.MythicRating.Rating,
+					Timed:       r.Completed,
+					CompletedAt: r.CompletedTimestamp,
+				})
+			}
+			sort.Slice(recentRuns, func(i, j int) bool {
+				if recentRuns[i].CompletedAt != recentRuns[j].CompletedAt {
+					return recentRuns[i].CompletedAt > recentRuns[j].CompletedAt
+				}
+				return recentRuns[i].Level > recentRuns[j].Level
+			})
+		}
+		// A season miss without index runs stores no row, and a failed season
+		// fetch must never wipe stored data with a zeroed row. Without season
+		// data the rating summary is unknown, so only the run lists are
+		// refreshed and a stored row keeps its real rating summary.
+		if seasonFound || (seasonMissing && len(recentRuns) > 0) {
+			var runs *domain.MythicRuns
+			if len(bestRuns) > 0 || len(recentRuns) > 0 {
+				runs = &domain.MythicRuns{Best: bestRuns, Recent: recentRuns}
+			}
+			upsert := domain.MythicPlus{
+				CharacterID:   c.ID,
+				Season:        SeasonDisplayName(anchor.SeasonName),
+				SeasonSlug:    season,
+				OverallRating: mp.MythicRating.Rating,
+				BestRunScore:  bestScore,
+				BestKeyLevel:  best,
+				Runs:          runs,
+				SyncedAt:      now,
+			}
+			var err error
+			if seasonFound {
+				err = e.Stores.Progression.UpsertMythicPlus(ctx, upsert)
+			} else {
+				err = e.Stores.Progression.UpsertMythicPlusRuns(ctx, upsert)
+			}
+			if err != nil {
+				progressionErr = err
+			}
 		}
 	}
 	raids, err := e.Client.CharacterRaids(ctx, m.Character.Realm.Slug, m.Character.Name)
@@ -193,10 +332,14 @@ func (e Engine) syncCharacter(
 		}
 	} else {
 		raidJSON, _ = json.Marshal(raids)
+		var rows []domain.RaidProgression
 		for _, ex := range raids.Expansions {
+			if anchor.ExpansionID > 0 && ex.ID != anchor.ExpansionID {
+				continue
+			}
 			for _, r := range ex.Instances {
 				for _, mode := range r.Modes {
-					if err = e.Stores.Progression.UpsertRaid(ctx, domain.RaidProgression{
+					rows = append(rows, domain.RaidProgression{
 						CharacterID: c.ID,
 						RaidSlug:    r.Instance.Slug,
 						RaidName:    r.Instance.Name,
@@ -205,11 +348,12 @@ func (e Engine) syncCharacter(
 						TotalBosses: mode.Progress.TotalCount,
 						Summary:     raidJSON,
 						SyncedAt:    now,
-					}); err != nil && progressionErr == nil {
-						progressionErr = err
-					}
+					})
 				}
 			}
+		}
+		if err = e.Stores.Progression.ReplaceRaids(ctx, c.ID, rows); err != nil && progressionErr == nil {
+			progressionErr = err
 		}
 	}
 	// Once the character is upserted, progression failures remain per-character
@@ -218,7 +362,7 @@ func (e Engine) syncCharacter(
 		CharacterID:  c.ID,
 		CapturedAt:   now,
 		ItemLevel:    c.ItemLevel,
-		MythicRating: mp.CurrentMythicRating.Rating,
+		MythicRating: mp.MythicRating.Rating,
 		BestKeyLevel: best,
 		RaidProgress: raidJSON,
 	}); err != nil {

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -72,6 +73,217 @@ func TestListByGuildReturnsEachCharacterOnceAcrossMythicSeasons(t *testing.T) {
 	rows, err = s.Characters.ListByGuild(ctx, g.ID, store.CharacterFilter{})
 	if err != nil || len(rows) != 1 || rows[0].ID != c.ID {
 		t.Fatalf("unfiltered rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestMythicPlusRunsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "mythic-runs", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := &domain.MythicRuns{
+		Best: []domain.MythicRun{
+			{Dungeon: "Apex Canopy", Level: 5, Score: 320, Timed: true, CompletedAt: 1700000000000},
+			{Dungeon: "Voidscar Arena", Level: 10, Score: 310, Timed: false, CompletedAt: 1700000001000},
+		},
+		Recent: []domain.MythicRun{
+			{Dungeon: "Cinderbrew Meadery", Level: 12, Score: 305, Timed: true, CompletedAt: 1700000009000},
+		},
+	}
+	if err := s.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
+		CharacterID:   c.ID,
+		Season:        "Season 2",
+		SeasonSlug:    "season-2",
+		OverallRating: 2500,
+		BestRunScore:  320,
+		BestKeyLevel:  10,
+		Runs:          runs,
+		SyncedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A row without a runs snapshot is the legacy shape: Runs must stay nil.
+	if err := s.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
+		CharacterID:   c.ID,
+		Season:        "Season 1",
+		SeasonSlug:    "season-1",
+		OverallRating: 1000,
+		BestKeyLevel:  8,
+		SyncedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil || len(d.Mythic) != 2 {
+		t.Fatalf("detail=%+v err=%v", d, err)
+	}
+	for _, m := range d.Mythic {
+		if m.SeasonSlug == "season-2" {
+			if !reflect.DeepEqual(m.Runs, runs) {
+				t.Fatalf("season-2 runs=%+v, want the stored snapshot", m.Runs)
+			}
+		} else if m.SeasonSlug == "season-1" && m.Runs != nil {
+			t.Fatalf("season-1 runs=%+v, want nil without a snapshot", m.Runs)
+		}
+	}
+}
+
+// UpsertMythicPlusRuns refreshes run lists without clobbering a stored rating
+// summary, and a fresh insert for an unseen season still writes the zeroed
+// summary.
+func TestUpsertMythicPlusRunsPreservesStoredSummary(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "mythic-runs", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
+		CharacterID:   c.ID,
+		Season:        "Season 2",
+		SeasonSlug:    "18",
+		OverallRating: 2500,
+		BestRunScore:  500,
+		BestKeyLevel:  12,
+		SyncedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newer := now.Add(time.Hour)
+	runs := &domain.MythicRuns{Recent: []domain.MythicRun{
+		{Dungeon: "Cinderbrew Meadery", Level: 12, Score: 110, Timed: true, CompletedAt: 1700000007000},
+	}}
+	if err := s.Progression.UpsertMythicPlusRuns(ctx, domain.MythicPlus{
+		CharacterID: c.ID,
+		Season:      "Season 2",
+		SeasonSlug:  "18",
+		Runs:        runs,
+		SyncedAt:    newer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil || len(d.Mythic) != 1 {
+		t.Fatalf("detail=%+v err=%v", d, err)
+	}
+	m := d.Mythic[0]
+	if m.OverallRating != 2500 || m.BestKeyLevel != 12 || m.BestRunScore != 500 {
+		t.Fatalf("mythic=%+v, want the stored rating summary untouched", m)
+	}
+	if !reflect.DeepEqual(m.Runs, runs) {
+		t.Fatalf("runs=%+v, want the refreshed run lists", m.Runs)
+	}
+	if !m.SyncedAt.Equal(newer) {
+		t.Fatalf("synced_at=%v, want %v", m.SyncedAt, newer)
+	}
+	if err := s.Progression.UpsertMythicPlusRuns(ctx, domain.MythicPlus{
+		CharacterID: c.ID,
+		Season:      "Season 3",
+		SeasonSlug:  "19",
+		Runs:        runs,
+		SyncedAt:    newer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil || len(d.Mythic) != 2 {
+		t.Fatalf("detail=%+v err=%v", d, err)
+	}
+	for _, m := range d.Mythic {
+		if m.SeasonSlug == "19" && (m.OverallRating != 0 || m.BestKeyLevel != 0 || m.BestRunScore != 0) {
+			t.Fatalf("season 19 mythic=%+v, want a zeroed summary on fresh insert", m)
+		}
+	}
+}
+
+func TestReplaceRaidsSwapsCharacterRows(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "raid-replace", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := []domain.RaidProgression{
+		{CharacterID: c.ID, RaidSlug: "emerald-nightmare", RaidName: "Emerald Nightmare",
+			Difficulty: "Normal", Progress: 7, TotalBosses: 7, Summary: []byte("{}"), SyncedAt: now},
+		{CharacterID: c.ID, RaidSlug: "nerubar-palace", RaidName: "Nerub-ar Palace",
+			Difficulty: "Heroic", Progress: 8, TotalBosses: 8, Summary: []byte("{}"), SyncedAt: now},
+	}
+	if err := s.Progression.ReplaceRaids(ctx, c.ID, legacy); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []domain.RaidProgression{
+		{CharacterID: c.ID, RaidSlug: "midnight-raid", RaidName: "Midnight Raid",
+			Difficulty: "Normal", Progress: 1, TotalBosses: 4, Summary: []byte("{}"), SyncedAt: now},
+	}
+	if err := s.Progression.ReplaceRaids(ctx, c.ID, replacement); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Raids) != 1 || d.Raids[0].RaidSlug != "midnight-raid" ||
+		d.Raids[0].RaidName != "Midnight Raid" || d.Raids[0].Progress != 1 || d.Raids[0].TotalBosses != 4 {
+		t.Fatalf("raids=%+v, want only the replacement row", d.Raids)
+	}
+	// An empty replacement set clears every stored row.
+	if err := s.Progression.ReplaceRaids(ctx, c.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Raids) != 0 {
+		t.Fatalf("raids=%+v, want zero rows after an empty replacement", d.Raids)
 	}
 }
 

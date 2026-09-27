@@ -35,20 +35,55 @@ type ProfileSummary struct {
 	EquippedItemLevel float64 `json:"equipped_item_level"`
 	AverageItemLevel  float64 `json:"average_item_level"`
 }
-type MythicPlus struct {
-	CurrentMythicRating struct {
+
+// MythicRunEntry is the run shape shared by the season profile and the
+// keystone profile index endpoints.
+type MythicRunEntry struct {
+	CompletedTimestamp int64 `json:"completed_timestamp"`
+	KeystoneLevel      int   `json:"keystone_level"`
+	Dungeon            struct {
+		Name string `json:"name"`
+	} `json:"dungeon"`
+	MythicRating struct {
 		Rating float64 `json:"rating"`
-	} `json:"current_mythic_rating"`
-	BestRuns []struct {
-		MythicLevel int `json:"mythic_level"`
-		Map         struct {
-			Name string `json:"name"`
-		} `json:"map"`
-		Score float64 `json:"score"`
-	} `json:"best_runs"`
+	} `json:"mythic_rating"`
+	Completed bool `json:"is_completed_within_time"`
+}
+type MythicPlus struct {
+	Season struct {
+		ID int `json:"id"`
+	} `json:"season"`
+	MythicRating struct {
+		Rating float64 `json:"rating"`
+	} `json:"mythic_rating"`
+	BestRuns []MythicRunEntry `json:"best_runs"`
+}
+type MythicPlusProfileIndex struct {
+	CurrentPeriod struct {
+		Period struct {
+			ID int `json:"id"`
+		} `json:"period"`
+		BestRuns []MythicRunEntry `json:"best_runs"`
+	} `json:"current_period"`
+}
+type MythicKeystoneSeasonIndex struct {
+	CurrentSeason struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"current_season"`
+	Seasons []struct {
+		ID int `json:"id"`
+	} `json:"seasons"`
+}
+type JournalExpansionIndex struct {
+	Tiers []struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"tiers"`
 }
 type Raids struct {
 	Expansions []struct {
+		ID        int `json:"id"`
 		Instances []struct {
 			Instance Name `json:"instance"`
 			Modes    []struct {
