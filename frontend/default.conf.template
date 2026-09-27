@@ -1,0 +1,63 @@
+# Rendered by the nginx entrypoint into /tmp/conf.d/default.conf at startup.
+# ${BACKEND_ORIGIN} and ${NGINX_LOCAL_RESOLVERS} come from the environment;
+# nginx variables ($uri, $host, ...) are untouched because envsubst only
+# substitutes defined environment variables.
+
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s;
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # An nginx variable keeps the origin a runtime lookup: nginx starts even
+    # when the backend is not up and returns 502 until it is.
+    set $backend ${BACKEND_ORIGIN};
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Vite emits content-hashed filenames; cache them indefinitely. Without
+    # "always" a 404 here is never sent with an immutable cache header.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        try_files $uri =404;
+    }
+
+    # Same-origin API and health endpoints; paths pass through unchanged,
+    # matching the Vite dev proxy in vite.config.ts.
+    location /api/ {
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /healthz {
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # History-based routing: unknown paths fall back to the SPA shell and
+    # internally redirect to the no-cache location below.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    }
+}

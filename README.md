@@ -44,7 +44,11 @@ make dev-up
 
 Use `make dev-down` to stop the stack and `make dev-logs` to follow service logs.
 
-Both workflows expose the frontend at http://localhost:5173, the backend at http://localhost:8080, and PostgreSQL at `localhost:5432`. In Compose, the Vite frontend proxies API requests to the separate backend service. The backend image does not package frontend assets; `STATIC_DIR` remains an optional native fallback only.
+Both workflows expose the frontend at http://localhost:5173, the backend at http://localhost:8080, and PostgreSQL at `localhost:5432`. In Compose, the Vite frontend proxies API requests to the separate backend service. The Compose `frontend` service builds the development image from `frontend/Dockerfile.dev`; the production image from `frontend/Dockerfile` is built by CI instead. The backend image does not package frontend assets; `STATIC_DIR` remains an optional native fallback only.
+
+## Container images
+
+CI builds and publishes `ghcr.io/brocahontaz/apekeeper-backend` and `ghcr.io/brocahontaz/apekeeper-frontend` on pushes to `main` and version tags (`v*`); pull requests build without publishing. The frontend image serves the built SPA with nginx and proxies `/api` and `/healthz` to the backend origin set in `BACKEND_ORIGIN` (default `http://backend:8080`). After the first publish, flip each GitHub package to public in its package settings and optionally link it to this repository — GitHub provides no API or workflow mechanism for this.
 
 ## Architecture
 
