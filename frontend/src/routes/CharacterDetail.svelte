@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { client, type Character, type MythicRun } from "$lib/api";
   import { classColor } from "$lib/theme";
-  import { relativeTime } from "$lib/format";
+  import { relativeTime, raceLabel } from "$lib/format";
   let { name }: { name: string } = $props();
   let character = $state<Character | null>(null);
   let error = $state("");
@@ -49,8 +49,10 @@
         <span><small>Realm</small>{character.realm}</span><span
           ><small>Class</small>{character.className}</span
         ><span><small>Specialization</small>{character.specName}</span><span
-          ><small>Level</small>{character.level}</span
-        ><span><small>Item level</small>{character.itemLevel}</span>
+          ><small>Race</small>{raceLabel(character.raceName, character.gender)}</span
+        ><span><small>Level</small>{character.level}</span><span
+          ><small>Item level</small>{character.itemLevel}</span
+        >
       </div>
       <span class:stale={character.stale}
         >{character.stale ? "Needs attention" : `Synced ${relativeTime(character.syncedAt)}`}</span

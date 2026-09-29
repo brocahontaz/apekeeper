@@ -17,6 +17,7 @@ var configVariables = []string{
 	"GUILD_REALM",
 	"GUILD_REGION",
 	"SYNC_SCHEDULE",
+	"SNAPSHOT_RETENTION_DAYS",
 	"OAUTH_REDIRECT_URL",
 	"SESSION_SECRET",
 	"SUPER_ADMIN_BATTLETAGS",
@@ -85,9 +86,40 @@ func TestLoadAcceptsCompleteConfigurationAndDefaults(t *testing.T) {
 		c.GuildName != "Ape Enclosure" ||
 		c.GuildRegion != "us" ||
 		c.SyncSchedule != "03:00" ||
+		c.SnapshotRetentionDays != 90 ||
 		c.StaticDir != "" {
 		t.Errorf("Load() defaults = %+v, want documented defaults", c)
 	}
+}
+
+func TestLoadParsesSnapshotRetentionDays(t *testing.T) {
+	t.Run("set value overrides the default", func(t *testing.T) {
+		values := validConfigEnv()
+		values["SNAPSHOT_RETENTION_DAYS"] = "30"
+		setConfigEnv(t, values)
+
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if c.SnapshotRetentionDays != 30 {
+			t.Errorf("SnapshotRetentionDays = %d, want 30", c.SnapshotRetentionDays)
+		}
+	})
+	t.Run("rejects non-positive and non-numeric values", func(t *testing.T) {
+		for _, value := range []string{"0", "-5", "abc"} {
+			t.Run(value, func(t *testing.T) {
+				values := validConfigEnv()
+				values["SNAPSHOT_RETENTION_DAYS"] = value
+				setConfigEnv(t, values)
+
+				_, err := Load()
+				if err == nil || err.Error() != "SNAPSHOT_RETENTION_DAYS: must be a positive integer" {
+					t.Errorf("Load() error = %v, want positive integer validation error", err)
+				}
+			})
+		}
+	})
 }
 
 func TestLoadRejectsInvalidDatabaseURL(t *testing.T) {

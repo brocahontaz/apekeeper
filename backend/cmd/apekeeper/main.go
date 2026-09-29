@@ -35,6 +35,10 @@ func health(p db.Pinger) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "db": dbStatus})
 	}
 }
+
+// sweepInterval drives the nightly cleanup of snapshot history and sessions.
+const sweepInterval = 24 * time.Hour
+
 func main() {
 	migrateOnly := flag.Bool("migrate", false, "apply database migrations")
 	flag.Parse()
@@ -87,6 +91,21 @@ func main() {
 	go scheduler.Run(ctx, func(c context.Context) {
 		if _, err := service.Start(c, "scheduled"); err != nil {
 			logg.Warn("scheduled sync failed", "error", err)
+		}
+	})
+	sweeper := sched.NewSweeper(sweepInterval, logg)
+	go sweeper.Run(ctx, func(c context.Context) {
+		cutoff := time.Now().AddDate(0, 0, -cfg.SnapshotRetentionDays)
+		deleted, err := stores.Progression.DeleteSnapshotsBefore(c, cutoff)
+		if err != nil {
+			logg.Warn("snapshot cleanup failed", "error", err)
+		} else {
+			logg.Info("snapshot cleanup complete", "deleted", deleted, "retention_days", cfg.SnapshotRetentionDays)
+		}
+		if deleted, err = stores.Users.DeleteExpiredSessions(c, time.Now()); err != nil {
+			logg.Warn("session cleanup failed", "error", err)
+		} else {
+			logg.Info("session cleanup complete", "deleted", deleted)
 		}
 	})
 	manager := auth.New(client, stores.Users, cfg.OAuthRedirectURL, []byte(cfg.SessionSecret))

@@ -78,3 +78,10 @@ func (s UserStore) DeleteSession(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id=$1`, id)
 	return err
 }
+
+// DeleteExpiredSessions drops sessions whose validity window has closed and
+// reports how many rows were removed.
+func (s UserStore) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= $1`, now)
+	return tag.RowsAffected(), err
+}

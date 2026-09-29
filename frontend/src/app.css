@@ -184,6 +184,24 @@ section,
 .dist-row:focus-visible .dist-tip {
   display: block;
 }
+.raid-group {
+  margin: 12px 0;
+}
+.raid-group small {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+.raid-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 44px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  margin: 7px 0;
+}
 table {
   border-collapse: collapse;
   width: 100%;
@@ -239,6 +257,9 @@ small {
   color: #e6d8bd;
   padding: 8px;
 }
+.toolbar .num {
+  width: 110px;
+}
 .toolbar button,
 .topbar button {
   background: none;
@@ -252,6 +273,44 @@ small {
 }
 .table-wrap {
   overflow: auto;
+}
+.restricted {
+  color: #cbb98d;
+  font-size: 12px;
+}
+.error-line {
+  display: block;
+  margin-top: 4px;
+  max-width: 260px;
+  color: #d8784f;
+}
+.run-failures summary {
+  cursor: pointer;
+  color: #cbb98d;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.run-failures summary:hover {
+  color: #f5c15e;
+}
+.failure-detail {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+}
+.failure-detail li {
+  margin: 4px 0;
+}
+.failure-detail strong {
+  color: #f5c15e;
+}
+code {
+  background: #141518;
+  border: 1px solid #48554a;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: #e6d8bd;
 }
 .pagination,
 .character-stats,

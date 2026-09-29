@@ -22,6 +22,8 @@ type Character struct {
 	ItemLevel      float64
 	MythicRating   float64
 	BestKeyLevel   int
+	RaceName       string
+	Gender         string
 	SyncedAt       time.Time
 }
 

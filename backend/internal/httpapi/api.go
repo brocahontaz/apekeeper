@@ -199,11 +199,16 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "roster class lookup failed")
 		return
 	}
+	specs, e := a.Stores.Characters.ListSpecsByGuild(r.Context(), g.ID)
+	if e != nil {
+		fail(w, 500, "roster spec lookup failed")
+		return
+	}
 	out := make([]map[string]any, 0, len(result.Items))
 	for _, c := range result.Items {
 		out = append(out, characterJSON(c, a.now()))
 	}
-	jsonOut(w, 200, map[string]any{"items": out, "total": result.Total, "page": page, "pageSize": pageSize, "classes": classes})
+	jsonOut(w, 200, map[string]any{"items": out, "total": result.Total, "page": page, "pageSize": pageSize, "classes": classes, "specs": specs})
 }
 func integer(s string) (int, bool) {
 	v, e := strconv.Atoi(s)
@@ -221,6 +226,8 @@ func characterJSON(c domain.Character, now time.Time) map[string]any {
 		"level":        c.Level,
 		"itemLevel":    c.ItemLevel,
 		"guildRank":    c.GuildRank,
+		"raceName":     c.RaceName,
+		"gender":       c.Gender,
 		"mythicRating": c.MythicRating,
 		"bestKeyLevel": c.BestKeyLevel,
 		"syncedAt":     c.SyncedAt,
