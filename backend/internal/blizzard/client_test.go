@@ -94,7 +94,7 @@ func TestRequestLogsFailedAttemptsAtDebug(t *testing.T) {
 
 func TestProfileDTOFixture(t *testing.T) {
 	var p dto.ProfileSummary
-	fixture := `{"name":"Thrall","realm":{"name":"Area 52","slug":"area-52"},"level":70,"character_class":{"id":7,"name":"Shaman"},"active_spec":{"id":262,"name":"Elemental"},"equipped_item_level":621,"average_item_level":619}`
+	fixture := `{"name":"Thrall","realm":{"name":"Area 52","slug":"area-52"},"level":70,"character_class":{"id":7,"name":"Shaman"},"active_spec":{"id":262,"name":"Elemental"},"race":{"key":{"href":"https://us.api.blizzard.com/data/wow/playable-race/8"},"name":"Tauren","id":8},"gender":{"type":"MALE","name":"Male"},"equipped_item_level":621,"average_item_level":619}`
 	if err := json.Unmarshal([]byte(fixture), &p); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +103,10 @@ func TestProfileDTOFixture(t *testing.T) {
 	}
 	if p.EquippedItemLevel != 621 || p.AverageItemLevel != 619 {
 		t.Fatalf("item levels = %v/%v, want 621/619", p.EquippedItemLevel, p.AverageItemLevel)
+	}
+	// Live profiles now carry localized names as plain strings.
+	if p.Race.Name != "Tauren" || p.Gender.Name != "Male" {
+		t.Fatalf("race/gender=%q/%q, want Tauren/Male", p.Race.Name, p.Gender.Name)
 	}
 }
 

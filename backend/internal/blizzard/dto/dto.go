@@ -1,5 +1,32 @@
 package dto
 
+import "encoding/json"
+
+// LocalizedText is a Blizzard localized name field. Profile endpoints have
+// changed this shape in the field: they now return plain strings where they
+// previously returned objects like {"en_US": "..."}, and the rigid struct this
+// type replaces turned one odd response into a failed character sync. It
+// decodes both shapes and keeps only the en_US value.
+type LocalizedText string
+
+// UnmarshalJSON accepts a plain JSON string or a localized object and stores
+// its en_US value; any other shape returns the decode error faithfully.
+func (t *LocalizedText) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*t = LocalizedText(s)
+		return nil
+	}
+	var m struct {
+		EnUS string `json:"en_US"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	*t = LocalizedText(m.EnUS)
+	return nil
+}
+
 type Name struct {
 	Name string `json:"name"`
 	Slug string `json:"slug"`
@@ -33,16 +60,12 @@ type ProfileSummary struct {
 		Name string `json:"name"`
 	} `json:"character_class"`
 	Race struct {
-		ID   int `json:"id"`
-		Name struct {
-			EnUS string `json:"en_US"`
-		} `json:"name"`
+		ID   int           `json:"id"`
+		Name LocalizedText `json:"name"`
 	} `json:"race"`
 	Gender struct {
-		Type string `json:"type"`
-		Name struct {
-			EnUS string `json:"en_US"`
-		} `json:"name"`
+		Type string        `json:"type"`
+		Name LocalizedText `json:"name"`
 	} `json:"gender"`
 	EquippedItemLevel float64 `json:"equipped_item_level"`
 	AverageItemLevel  float64 `json:"average_item_level"`
