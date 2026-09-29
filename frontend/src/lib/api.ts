@@ -17,6 +17,8 @@ export type Character = {
   level: number;
   itemLevel: number;
   guildRank?: number;
+  raceName?: string;
+  gender?: string;
   avatarUrl?: string;
   mythicRating: number;
   bestKeyLevel: number;
@@ -37,6 +39,7 @@ export type RosterPage = {
   page: number;
   pageSize: number;
   classes: string[];
+  specs: string[];
 };
 export type SyncRun = {
   id: number;
@@ -64,6 +67,7 @@ export type Dashboard = {
   mythicPlus: {
     top: { name: string; realm: string; rating: number; bestKey: number }[];
     averageRating: number;
+    ratedCount: number;
   };
   raidProgression: {
     raidName: string;

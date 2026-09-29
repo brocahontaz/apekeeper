@@ -1,5 +1,12 @@
 import type { Character } from "./api";
-export type Filters = { search?: string; class?: string; stale?: boolean };
+export type Filters = {
+  search?: string;
+  class?: string;
+  spec?: string;
+  stale?: boolean;
+  minLevel?: number;
+  minRating?: number;
+};
 export function filterRoster(rows: Character[], f: Filters) {
   return rows.filter(
     (r) =>
@@ -37,5 +44,14 @@ export function rosterQuery(
   if (filters.search) query.set("search", filters.search);
   if (filters.class) query.set("class", filters.class);
   if (filters.stale) query.set("stale", "true");
+  // Numeric thresholds are only sent when they carry a usable value: the
+  // backend parses minLevel as any integer and minRating as any non-empty
+  // float, so a zero or undefined level is meaningless while a defined
+  // rating (including 0) is a real threshold.
+  if (filters.spec) query.set("spec", filters.spec);
+  if (filters.minLevel !== undefined && filters.minLevel > 0)
+    query.set("minLevel", String(filters.minLevel));
+  if (filters.minRating !== undefined && filters.minRating >= 0)
+    query.set("minRating", String(filters.minRating));
   return query;
 }

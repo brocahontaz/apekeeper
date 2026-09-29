@@ -7,3 +7,7 @@ export function relativeTime(value?: string | Date | null): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 export const number = (n?: number) => new Intl.NumberFormat().format(n ?? 0);
+export function raceLabel(raceName?: string, gender?: string): string {
+  if (!raceName && !gender) return "—";
+  return [raceName, gender].filter(Boolean).join(" · ");
+}

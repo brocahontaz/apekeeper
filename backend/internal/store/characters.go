@@ -74,17 +74,49 @@ func (s CharacterSort) SQL() string {
 	}
 }
 
+// raceGenderFromProfile extracts the localized race and gender names from a
+// Blizzard profile summary. Any parse failure yields empty strings; it must
+// never fail the upsert.
+func raceGenderFromProfile(profile []byte) (raceName, gender string) {
+	var p struct {
+		Race struct {
+			Name json.RawMessage `json:"name"`
+		} `json:"race"`
+		Gender struct {
+			Name json.RawMessage `json:"name"`
+		} `json:"gender"`
+	}
+	if json.Unmarshal(profile, &p) != nil {
+		return "", ""
+	}
+	localized := func(raw json.RawMessage) string {
+		var m struct {
+			EnUS string `json:"en_US"`
+		}
+		if json.Unmarshal(raw, &m) == nil && m.EnUS != "" {
+			return m.EnUS
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	return localized(p.Race.Name), localized(p.Gender.Name)
+}
+
 func (s CharacterStore) UpsertByGuildIdentity(
 	ctx context.Context,
 	c domain.Character,
 	profile []byte,
 ) (domain.Character, error) {
+	raceName, gender := raceGenderFromProfile(profile)
 	q := `INSERT INTO characters(
 		guild_id,name,display_name,normalized_name,realm,realm_slug,region,
 		class_id,class_name,spec_id,spec_name,level,item_level,guild_rank,
-		profile_json,synced_at
+		race_name,gender,profile_json,synced_at
 	)
-	VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+	VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 	ON CONFLICT(guild_id,region,realm_slug,normalized_name) DO UPDATE SET
 		display_name=EXCLUDED.display_name,
 		class_id=EXCLUDED.class_id,
@@ -94,6 +126,8 @@ func (s CharacterStore) UpsertByGuildIdentity(
 		level=EXCLUDED.level,
 		item_level=EXCLUDED.item_level,
 		guild_rank=EXCLUDED.guild_rank,
+		race_name=EXCLUDED.race_name,
+		gender=EXCLUDED.gender,
 		profile_json=EXCLUDED.profile_json,
 		synced_at=EXCLUDED.synced_at,
 		updated_at=now()
@@ -103,6 +137,7 @@ func (s CharacterStore) UpsertByGuildIdentity(
 		c.Realm, c.RealmSlug, c.Region,
 		c.ClassID, c.ClassName, c.SpecID, c.SpecName,
 		c.Level, c.ItemLevel, c.GuildRank,
+		raceName, gender,
 		profile, c.SyncedAt,
 	).Scan(&c.ID)
 	return c, e
@@ -124,6 +159,7 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 		COALESCE(class_id,0),COALESCE(class_name,''),
 		COALESCE(spec_id,0),COALESCE(spec_name,''),
 		COALESCE(level,0),COALESCE(item_level,0),COALESCE(guild_rank,0),
+		COALESCE(race_name,''),COALESCE(gender,''),
 		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=characters.id),0),
 		COALESCE((SELECT MAX(best_key_level) FROM mythic_plus m WHERE m.character_id=characters.id),0),
 		COALESCE(synced_at,'epoch'),COALESCE(avatar_url,'')
@@ -136,6 +172,7 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 			&d.Character.ClassID, &d.Character.ClassName,
 			&d.Character.SpecID, &d.Character.SpecName,
 			&d.Character.Level, &d.Character.ItemLevel, &d.Character.GuildRank,
+			&d.Character.RaceName, &d.Character.Gender,
 			&d.Character.MythicRating, &d.Character.BestKeyLevel, &d.Character.SyncedAt,
 			&d.AvatarURL,
 		)
@@ -254,6 +291,23 @@ func (s CharacterStore) ListClassesByGuild(ctx context.Context, guildID int64) (
 	return classes, rows.Err()
 }
 
+func (s CharacterStore) ListSpecsByGuild(ctx context.Context, guildID int64) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT spec_name FROM characters WHERE guild_id=$1 AND COALESCE(spec_name,'') <> '' ORDER BY spec_name`, guildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	specs := []string{}
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		specs = append(specs, spec)
+	}
+	return specs, rows.Err()
+}
+
 func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f CharacterFilter, limit, offset int, sort CharacterSort, descending bool) (CharacterPage, error) {
 	args := []any{guildID}
 	where := []string{"c.guild_id=$1"}
@@ -292,6 +346,7 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 		COALESCE(c.class_id,0),COALESCE(c.class_name,''),
 		COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
 		COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
+		COALESCE(c.race_name,''),COALESCE(c.gender,''),
 		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0),
 		COALESCE((SELECT MAX(best_key_level) FROM mythic_plus m WHERE m.character_id=c.id),0),
 		COALESCE(c.synced_at,'epoch')
@@ -322,6 +377,7 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 			&c.ClassID, &c.ClassName,
 			&c.SpecID, &c.SpecName,
 			&c.Level, &c.ItemLevel, &c.GuildRank,
+			&c.RaceName, &c.Gender,
 			&c.MythicRating, &c.BestKeyLevel, &c.SyncedAt,
 		)
 		if e != nil {

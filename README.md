@@ -48,7 +48,7 @@ Both workflows expose the frontend at http://localhost:5173, the backend at http
 
 ## Container images
 
-CI builds and publishes `ghcr.io/brocahontaz/apekeeper-backend` and `ghcr.io/brocahontaz/apekeeper-frontend` on pushes to `main` and version tags (`v*`); pull requests build without publishing. The frontend image serves the built SPA with nginx and proxies `/api` and `/healthz` to the backend origin set in `BACKEND_ORIGIN` (default `http://backend:8080`). After the first publish, flip each GitHub package to public in its package settings and optionally link it to this repository — GitHub provides no API or workflow mechanism for this.
+CI builds and publishes `ghcr.io/brocahontaz/apekeeper-backend` and `ghcr.io/brocahontaz/apekeeper-frontend` on pushes to `main` and version tags (`v*`); pull requests build without publishing. Pull requests and pushes to `main` also run the `ci` workflow's quality gates: backend (gofmt, go vet, tests against a PostgreSQL service) and frontend (svelte-check, vitest, build). The frontend image serves the built SPA with nginx and proxies `/api` and `/healthz` to the backend origin set in `BACKEND_ORIGIN` (default `http://backend:8080`). After the first publish, flip each GitHub package to public in its package settings and optionally link it to this repository — GitHub provides no API or workflow mechanism for this.
 
 ## Architecture
 
@@ -61,6 +61,8 @@ docs/      operations and architecture notes
 ```
 
 Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks. The platform-level `superadmin` role has at least every admin capability and is granted at sign-in to BattleTags listed in the optional `SUPER_ADMIN_BATTLETAGS` variable (comma-separated, trimmed); it is intended for the repository or platform owner rather than the guild's actual GM, who holds the `admin` ("Guild Master") role.
+
+A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETENTION_DAYS` (default 90) and expired sessions.
 
 ## Tests
 

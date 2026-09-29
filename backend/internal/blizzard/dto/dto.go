@@ -32,6 +32,18 @@ type ProfileSummary struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	} `json:"character_class"`
+	Race struct {
+		ID   int `json:"id"`
+		Name struct {
+			EnUS string `json:"en_US"`
+		} `json:"name"`
+	} `json:"race"`
+	Gender struct {
+		Type string `json:"type"`
+		Name struct {
+			EnUS string `json:"en_US"`
+		} `json:"name"`
+	} `json:"gender"`
 	EquippedItemLevel float64 `json:"equipped_item_level"`
 	AverageItemLevel  float64 `json:"average_item_level"`
 }

@@ -56,3 +56,35 @@ func (s *Scheduler) next(now time.Time) (time.Time, error) {
 	}
 	return n, nil
 }
+
+// Sweeper runs a cleanup function immediately at startup and then on a fixed
+// interval until the context is cancelled.
+type Sweeper struct {
+	Interval time.Duration
+	Log      *slog.Logger
+}
+
+func NewSweeper(interval time.Duration, log *slog.Logger) *Sweeper {
+	return &Sweeper{Interval: interval, Log: log}
+}
+
+func (s *Sweeper) Run(ctx context.Context, fn func(context.Context)) {
+	if s.Interval <= 0 {
+		s.Log.Error("invalid sweep interval", "interval", s.Interval)
+		return
+	}
+	s.Log.Info("cleanup sweeper starting", "interval", s.Interval)
+	fn(ctx)
+	ticker := time.NewTicker(s.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			s.Log.Info("cleanup sweeper stopped")
+			return
+		case <-ticker.C:
+			s.Log.Info("scheduled cleanup sweep")
+			fn(ctx)
+		}
+	}
+}

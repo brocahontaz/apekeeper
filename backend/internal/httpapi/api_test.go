@@ -102,6 +102,13 @@ func TestStoreBackedHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", "Arcane", now)
+	// Give Alpha a profile summary carrying the localized race/gender maps the
+	// sync engine stores; the detail handler must surface them.
+	alpha, err = stores.Characters.UpsertByGuildIdentity(ctx, alpha, []byte(
+		`{"race":{"id":5,"name":{"en_US":"Dwarf"}},"gender":{"type":"MALE","name":{"en_US":"Male"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stores.Progression.UpsertMythicPlus(ctx, domain.MythicPlus{
 		CharacterID:   alpha.ID,
 		Season:        "Season 1",
@@ -265,6 +272,26 @@ func TestStoreBackedHandlers(t *testing.T) {
 		if len(classes) != 3 || classes[0] != "Mage" || classes[1] != "Rogue" || classes[2] != "Warrior" {
 			t.Fatalf("roster classes=%v", classes)
 		}
+		specs := body["specs"].([]any)
+		if len(specs) != 3 || specs[0] != "Arcane" || specs[1] != "Arms" || specs[2] != "Combat" {
+			t.Fatalf("roster specs=%v", specs)
+		}
+		for _, path := range []string{"/api/roster?spec=Arcane", "/api/roster?minRating=1000"} {
+			r := request(h, http.MethodGet, path, member)
+			if r.Code != http.StatusOK {
+				t.Fatalf("path=%s status=%d body=%s", path, r.Code, r.Body.String())
+			}
+			body := decodeBody(t, r).(map[string]any)
+			items := body["items"].([]any)
+			if body["total"] != float64(1) || len(items) != 1 || items[0].(map[string]any)["name"] != "Alpha" {
+				t.Fatalf("path=%s roster=%v", path, body)
+			}
+		}
+		r = request(h, http.MethodGet, "/api/roster?minLevel=70", member)
+		body = decodeBody(t, r).(map[string]any)
+		if body["total"] != float64(3) || len(body["items"].([]any)) != 3 {
+			t.Fatalf("minLevel roster=%v", body)
+		}
 		assertStatus(t, h, http.MethodGet, "/api/roster?sort=drop%20table", member, http.StatusBadRequest)
 	})
 	t.Run("character detail and unknown character", func(t *testing.T) {
@@ -279,6 +306,9 @@ func TestStoreBackedHandlers(t *testing.T) {
 		}
 		if body["avatarUrl"] != "https://render.worldofwarcraft.com/us/alpha.jpg" {
 			t.Fatalf("avatarUrl=%v", body["avatarUrl"])
+		}
+		if body["raceName"] != "Dwarf" || body["gender"] != "Male" {
+			t.Fatalf("raceName=%v gender=%v, want Dwarf/Male", body["raceName"], body["gender"])
 		}
 		mythic := body["mythicPlus"].([]any)[0].(map[string]any)
 		if mythic["overallRating"] != float64(2500) || mythic["seasonSlug"] != "season-1" {

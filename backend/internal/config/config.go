@@ -11,40 +11,50 @@ import (
 )
 
 type Config struct {
-	DatabaseURL          string
-	ServerPort           string
-	LogLevel             string
-	BlizzardClientID     string
-	BlizzardClientSecret string
-	BlizzardRegion       string
-	BlizzardLocale       string
-	GuildName            string
-	GuildRealm           string
-	GuildRegion          string
-	SyncSchedule         string
-	OAuthRedirectURL     string
-	SessionSecret        string
-	SuperAdminBattleTags []string
-	StaticDir            string
+	DatabaseURL           string
+	ServerPort            string
+	LogLevel              string
+	BlizzardClientID      string
+	BlizzardClientSecret  string
+	BlizzardRegion        string
+	BlizzardLocale        string
+	GuildName             string
+	GuildRealm            string
+	GuildRegion           string
+	SyncSchedule          string
+	SnapshotRetentionDays int
+	OAuthRedirectURL      string
+	SessionSecret         string
+	SuperAdminBattleTags  []string
+	StaticDir             string
 }
 
 func Load() (Config, error) {
+	retention := 90
+	if v := os.Getenv("SNAPSHOT_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("SNAPSHOT_RETENTION_DAYS: must be a positive integer")
+		}
+		retention = n
+	}
 	c := Config{
-		DatabaseURL:          os.Getenv("DATABASE_URL"),
-		ServerPort:           env("SERVER_PORT", "8080"),
-		LogLevel:             env("LOG_LEVEL", "info"),
-		BlizzardClientID:     os.Getenv("BLIZZARD_CLIENT_ID"),
-		BlizzardClientSecret: os.Getenv("BLIZZARD_CLIENT_SECRET"),
-		BlizzardRegion:       env("BLIZZARD_REGION", "us"),
-		BlizzardLocale:       env("BLIZZARD_LOCALE", "en_US"),
-		GuildName:            env("GUILD_NAME", "Ape Enclosure"),
-		GuildRealm:           os.Getenv("GUILD_REALM"),
-		GuildRegion:          env("GUILD_REGION", "us"),
-		SyncSchedule:         env("SYNC_SCHEDULE", "03:00"),
-		OAuthRedirectURL:     os.Getenv("OAUTH_REDIRECT_URL"),
-		SessionSecret:        os.Getenv("SESSION_SECRET"),
-		SuperAdminBattleTags: parseBattleTags(os.Getenv("SUPER_ADMIN_BATTLETAGS")),
-		StaticDir:            os.Getenv("STATIC_DIR"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		ServerPort:            env("SERVER_PORT", "8080"),
+		LogLevel:              env("LOG_LEVEL", "info"),
+		BlizzardClientID:      os.Getenv("BLIZZARD_CLIENT_ID"),
+		BlizzardClientSecret:  os.Getenv("BLIZZARD_CLIENT_SECRET"),
+		BlizzardRegion:        env("BLIZZARD_REGION", "us"),
+		BlizzardLocale:        env("BLIZZARD_LOCALE", "en_US"),
+		GuildName:             env("GUILD_NAME", "Ape Enclosure"),
+		GuildRealm:            os.Getenv("GUILD_REALM"),
+		GuildRegion:           env("GUILD_REGION", "us"),
+		SyncSchedule:          env("SYNC_SCHEDULE", "03:00"),
+		SnapshotRetentionDays: retention,
+		OAuthRedirectURL:      os.Getenv("OAUTH_REDIRECT_URL"),
+		SessionSecret:         os.Getenv("SESSION_SECRET"),
+		SuperAdminBattleTags:  parseBattleTags(os.Getenv("SUPER_ADMIN_BATTLETAGS")),
+		StaticDir:             os.Getenv("STATIC_DIR"),
 	}
 
 	missing := make([]string, 0, 6)

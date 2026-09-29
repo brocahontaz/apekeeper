@@ -10,7 +10,7 @@ describe("filterRoster", () =>
     expect(filterRoster(rows, { stale: true })).toEqual([rows[1]]);
   }));
 
-describe("rosterQuery", () =>
+describe("rosterQuery", () => {
   it("includes the active sort and filters when fetching a page", () => {
     expect(
       rosterQuery({
@@ -25,4 +25,33 @@ describe("rosterQuery", () =>
     ).toBe(
       "page=2&pageSize=25&sort=mythicRating&direction=descending&search=alp&class=Mage&stale=true",
     );
-  }));
+  });
+
+  it("includes spec and numeric thresholds when set", () => {
+    expect(
+      rosterQuery({
+        spec: "Arcane",
+        minLevel: 70,
+        minRating: 1000,
+        page: 1,
+        pageSize: 25,
+        sort: "guildRank",
+        direction: "ascending",
+      }).toString(),
+    ).toBe(
+      "page=1&pageSize=25&sort=guildRank&direction=ascending&spec=Arcane&minLevel=70&minRating=1000",
+    );
+  });
+
+  it("omits unset spec and numeric filters from the query string", () => {
+    expect(
+      rosterQuery({
+        minLevel: 0,
+        page: 1,
+        pageSize: 25,
+        sort: "guildRank",
+        direction: "ascending",
+      }).toString(),
+    ).toBe("page=1&pageSize=25&sort=guildRank&direction=ascending");
+  });
+});

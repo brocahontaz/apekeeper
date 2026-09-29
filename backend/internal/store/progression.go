@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"time"
+
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -99,4 +101,11 @@ func (s ProgressionStore) InsertSnapshot(ctx context.Context, x domain.Snapshot)
 	VALUES($1,$2,$3,$4,$5,$6)`,
 		x.CharacterID, x.CapturedAt, x.ItemLevel, x.MythicRating, x.BestKeyLevel, x.RaidProgress)
 	return e
+}
+
+// DeleteSnapshotsBefore drops snapshot history captured before the retention
+// cutoff and reports how many rows were removed.
+func (s ProgressionStore) DeleteSnapshotsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, e := s.pool.Exec(ctx, `DELETE FROM progression_snapshots WHERE captured_at < $1`, cutoff)
+	return tag.RowsAffected(), e
 }

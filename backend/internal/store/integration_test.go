@@ -76,6 +76,107 @@ func TestListByGuildReturnsEachCharacterOnceAcrossMythicSeasons(t *testing.T) {
 	}
 }
 
+func TestUpsertByGuildIdentityPopulatesRaceAndGender(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "race-gender", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	dwarf := []byte(`{
+		"name": "One",
+		"race": {"key": {"href": "https://us.api.blizzard.com/data/wow/playable-race/5"}, "id": 5, "name": {"en_US": "Dwarf", "es_MX": "Enano"}},
+		"gender": {"type": "MALE", "name": {"en_US": "Male", "es_MX": "Masculino"}}
+	}`)
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, dwarf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Character.RaceName != "Dwarf" || d.Character.Gender != "Male" {
+		t.Fatalf("detail race/gender=%q/%q, want Dwarf/Male", d.Character.RaceName, d.Character.Gender)
+	}
+	// A re-sync with a different profile refreshes the columns via EXCLUDED.
+	orc := []byte(`{
+		"race": {"id": 2, "name": {"en_US": "Orc"}},
+		"gender": {"type": "FEMALE", "name": {"en_US": "Female"}}
+	}`)
+	if _, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, orc); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Character.RaceName != "Orc" || d.Character.Gender != "Female" {
+		t.Fatalf("refreshed race/gender=%q/%q, want Orc/Female", d.Character.RaceName, d.Character.Gender)
+	}
+	// An empty profile clears the columns instead of failing the upsert.
+	if _, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Character.RaceName != "" || d.Character.Gender != "" {
+		t.Fatalf("cleared race/gender=%q/%q, want empty", d.Character.RaceName, d.Character.Gender)
+	}
+	// The list view carries the same columns.
+	orcAgain := []byte(`{"race": {"id": 2, "name": {"en_US": "Orc"}}, "gender": {"type": "FEMALE", "name": {"en_US": "Female"}}}`)
+	if _, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, orcAgain); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.Characters.ListByGuild(ctx, g.ID, store.CharacterFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("list rows=%+v err=%v", rows, err)
+	}
+	if rows[0].RaceName != "Orc" || rows[0].Gender != "Female" {
+		t.Fatalf("list race/gender=%q/%q, want Orc/Female", rows[0].RaceName, rows[0].Gender)
+	}
+}
+
 func TestMythicPlusRunsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	p, _ := testdb.New(t)
@@ -338,5 +439,88 @@ func TestUpsertBattleNetUserFirstSuperAdminPrecedesBootstrapAdmin(t *testing.T) 
 	}
 	if u.Role != "superadmin" {
 		t.Fatalf("first flagged user role = %q, want superadmin", u.Role)
+	}
+}
+
+func TestDeleteSnapshotsBeforeRemovesOnlyOldSnapshots(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "snapshot-retention", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID:        g.ID,
+		Name:           "One",
+		DisplayName:    "One",
+		NormalizedName: "one",
+		Realm:          "Area 52",
+		RealmSlug:      "area-52",
+		Region:         "us",
+		SyncedAt:       now,
+	}, []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := now.AddDate(0, 0, -120)
+	recent := now.AddDate(0, 0, -1)
+	for _, x := range []domain.Snapshot{
+		{CharacterID: c.ID, CapturedAt: stale, ItemLevel: 400, RaidProgress: []byte("[]")},
+		{CharacterID: c.ID, CapturedAt: recent, ItemLevel: 420, RaidProgress: []byte("[]")},
+	} {
+		if err := s.Progression.InsertSnapshot(ctx, x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, err := s.Progression.DeleteSnapshotsBefore(ctx, now.AddDate(0, 0, -90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	d, err := s.Characters.Detail(ctx, g.ID, c.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Snapshots) != 1 || !d.Snapshots[0].CapturedAt.Equal(recent) {
+		t.Fatalf("snapshots=%+v, want only the recent snapshot", d.Snapshots)
+	}
+}
+
+func TestDeleteExpiredSessionsRemovesOnlyExpiredSessions(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	now := time.Now().Truncate(time.Second)
+	u, err := s.Users.UpsertBattleNetUser(ctx, "1", "Sweeper#1", "", "", now.Add(time.Hour), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []struct {
+		id        string
+		expiresAt time.Time
+	}{
+		{id: "expired", expiresAt: now.Add(-time.Hour)},
+		{id: "valid", expiresAt: now.Add(time.Hour)},
+	} {
+		if err := s.Users.CreateSession(ctx, session.id, u.ID, session.expiresAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, err := s.Users.DeleteExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	if _, err := s.Users.SessionUser(ctx, "expired"); err == nil {
+		t.Fatal("SessionUser(expired) error = nil, want not-found error")
+	}
+	if _, err := s.Users.SessionUser(ctx, "valid"); err != nil {
+		t.Fatalf("SessionUser(valid) error = %v, want the session to resolve", err)
 	}
 }
