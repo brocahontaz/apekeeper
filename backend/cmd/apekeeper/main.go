@@ -19,6 +19,7 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/httpapi"
 	"github.com/brocahontaz/apekeeper/backend/internal/logger"
 	"github.com/brocahontaz/apekeeper/backend/internal/migrations"
+	"github.com/brocahontaz/apekeeper/backend/internal/notify"
 	"github.com/brocahontaz/apekeeper/backend/internal/sched"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 	appsync "github.com/brocahontaz/apekeeper/backend/internal/sync"
@@ -84,8 +85,9 @@ func main() {
 			Stores: stores,
 			Log:    logg,
 		},
-		Guild: guild,
-		Log:   logg,
+		Guild:    guild,
+		Log:      logg,
+		Notifier: notify.NewDiscord(cfg.DiscordWebhookURL, logg),
 	}
 	scheduler := sched.New(cfg.SyncSchedule, logg)
 	go scheduler.Run(ctx, func(c context.Context) {

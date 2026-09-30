@@ -76,6 +76,90 @@ func TestListByGuildReturnsEachCharacterOnceAcrossMythicSeasons(t *testing.T) {
 	}
 }
 
+// DashboardByGuild must return every character once, grouped with its best
+// season key, all raid rows, and the snapshot window's first and last entries
+// — the aggregates the dashboard used to load with one Detail call each.
+func TestDashboardByGuildAggregatesCharactersAndProgression(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "dashboard-by-guild", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	upsert := func(name string) domain.Character {
+		t.Helper()
+		c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+			GuildID:        g.ID,
+			Name:           name,
+			DisplayName:    name,
+			NormalizedName: name,
+			Realm:          "Area 52",
+			RealmSlug:      "area-52",
+			Region:         "us",
+			ClassName:      "Mage",
+			SpecName:       "Arcane",
+			Level:          70,
+			SyncedAt:       now,
+		}, []byte("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	one, two := upsert("One"), upsert("Two")
+	// Season one carries the higher keystone level but the lower rating; the
+	// dashboard's BestKey must come from the best-rated row, not the max key.
+	for _, m := range []domain.MythicPlus{
+		{CharacterID: one.ID, SeasonSlug: "one", OverallRating: 1000, BestKeyLevel: 15, SyncedAt: now},
+		{CharacterID: one.ID, SeasonSlug: "two", OverallRating: 2000, BestKeyLevel: 12, SyncedAt: now},
+	} {
+		if err := s.Progression.UpsertMythicPlus(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Progression.ReplaceRaids(ctx, two.ID, []domain.RaidProgression{
+		{CharacterID: two.ID, RaidSlug: "raid-a", RaidName: "Raid A", Difficulty: "heroic", Progress: 4, TotalBosses: 8, SyncedAt: now},
+		{CharacterID: two.ID, RaidSlug: "raid-b", RaidName: "Raid B", Difficulty: "normal", Progress: 2, TotalBosses: 5, SyncedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old, mid, fresh := now.AddDate(0, 0, -40), now.AddDate(0, 0, -20), now.AddDate(0, 0, -2)
+	for _, snap := range []domain.Snapshot{
+		{CharacterID: two.ID, CapturedAt: old, ItemLevel: 400, MythicRating: 100, RaidProgress: []byte("[]")},
+		{CharacterID: two.ID, CapturedAt: mid, ItemLevel: 500, MythicRating: 1500, RaidProgress: []byte("[]")},
+		{CharacterID: two.ID, CapturedAt: fresh, ItemLevel: 600, MythicRating: 2000, RaidProgress: []byte("[]")},
+	} {
+		if err := s.Progression.InsertSnapshot(ctx, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.Characters.DashboardByGuild(ctx, g.ID, now.AddDate(0, 0, -30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Character.DisplayName != "One" || rows[1].Character.DisplayName != "Two" {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if rows[0].Character.MythicRating != 2000 || rows[0].BestKey != 12 {
+		t.Fatalf("One mythic=%v bestKey=%d, want rating 2000 from the season-two row", rows[0].Character.MythicRating, rows[0].BestKey)
+	}
+	if len(rows[0].Raids) != 0 || rows[0].SnapshotCount != 0 {
+		t.Fatalf("One raids=%d snapshots=%d, want none", len(rows[0].Raids), rows[0].SnapshotCount)
+	}
+	if len(rows[1].Raids) != 2 ||
+		rows[1].Raids[0].RaidSlug != "raid-a" || rows[1].Raids[1].RaidSlug != "raid-b" {
+		t.Fatalf("Two raids=%+v", rows[1].Raids)
+	}
+	if rows[1].SnapshotCount != 2 ||
+		!rows[1].First.CapturedAt.Equal(mid) || rows[1].First.ItemLevel != 500 ||
+		!rows[1].Last.CapturedAt.Equal(fresh) || rows[1].Last.MythicRating != 2000 {
+		t.Fatalf("Two snapshots count=%d first=%+v last=%+v, want the two in-window snapshots",
+			rows[1].SnapshotCount, rows[1].First, rows[1].Last)
+	}
+}
+
 func TestUpsertByGuildIdentityPopulatesRaceAndGender(t *testing.T) {
 	ctx := context.Background()
 	p, _ := testdb.New(t)

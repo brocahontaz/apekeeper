@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -247,6 +248,29 @@ func TestStoreBackedHandlers(t *testing.T) {
 			spec := specs[0].(map[string]any)
 			if spec["name"] != wantSpecs[i] || spec["count"] != float64(1) {
 				t.Fatalf("class %s specs=%v, want %s", entry["className"], specs, wantSpecs[i])
+			}
+		}
+	})
+	t.Run("roster export streams csv", func(t *testing.T) {
+		assertStatus(t, h, http.MethodGet, "/api/roster/export", "", http.StatusUnauthorized)
+		r := request(h, http.MethodGet, "/api/roster/export", member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		if ct := r.Header().Get("Content-Type"); ct != "text/csv; charset=utf-8" {
+			t.Fatalf("content-type=%q", ct)
+		}
+		wantDisposition := `attachment; filename="roster-ape-20260115.csv"`
+		if cd := r.Header().Get("Content-Disposition"); cd != wantDisposition {
+			t.Fatalf("disposition=%q, want %q", cd, wantDisposition)
+		}
+		lines := strings.Split(strings.TrimSuffix(r.Body.String(), "\n"), "\n")
+		if len(lines) != 4 || !strings.HasPrefix(lines[0], "Name,Realm,Class") {
+			t.Fatalf("csv lines=%d header=%q", len(lines), lines[0])
+		}
+		for i, want := range []string{"Alpha", "Beta", "Gamma"} {
+			if !strings.HasPrefix(lines[i+1], want+",") {
+				t.Fatalf("csv row %d=%q, want it to start with %s", i+1, lines[i+1], want)
 			}
 		}
 	})

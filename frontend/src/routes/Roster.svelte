@@ -145,7 +145,7 @@
       stale = false;
       update();
     }}>Clear</button
-  >
+  ><a class="export" href="/api/roster/export" download>Export CSV</a>
 </div>
 {#if error}<p class="error">{error}</p>{:else if loading}<p class="skeleton">
     Loading roster…
