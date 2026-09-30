@@ -58,6 +58,7 @@ func New(a API) http.Handler {
 	m.HandleFunc("GET /api/healthz", a.health)
 	m.Handle("GET /api/dashboard", a.requireAuth(http.HandlerFunc(a.dashboard)))
 	m.Handle("GET /api/roster", a.requireAuth(http.HandlerFunc(a.roster)))
+	m.Handle("GET /api/roster/export", a.requireAuth(http.HandlerFunc(a.rosterExport)))
 	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
 	m.Handle("GET /api/sync/runs",
 		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
@@ -264,7 +265,7 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "guild lookup failed")
 		return
 	}
-	chars, e := a.Stores.Characters.ListByGuild(r.Context(), g.ID, store.CharacterFilter{})
+	chars, e := a.Stores.Characters.DashboardByGuild(r.Context(), g.ID, a.now().Add(-30*24*time.Hour))
 	if e != nil {
 		fail(w, 500, "dashboard lookup failed")
 		return
@@ -277,7 +278,8 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	rated := 0
 	raids := map[string]map[string]map[string]int{}
 	notable := []map[string]any{}
-	for _, c := range chars {
+	for _, row := range chars {
+		c := row.Character
 		if classes[c.ClassName] == nil {
 			classes[c.ClassName] = map[string]any{
 				"classId":   c.ClassID,
@@ -307,27 +309,20 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-		d, err := a.Stores.Characters.Detail(r.Context(), g.ID, c.ID, a.now().Add(-30*24*time.Hour))
-		if err != nil {
-			continue
-		}
-		bestRating, bestKey := 0.0, 0
-		for _, m := range d.Mythic {
-			if m.OverallRating > bestRating {
-				bestRating, bestKey = m.OverallRating, m.BestKeyLevel
-			}
-		}
-		if bestRating > 0 {
+		// MythicRating is the character's best season rating and BestKey the
+		// keystone level of that season, both fetched by the single dashboard
+		// query instead of a per-character Detail call.
+		if c.MythicRating > 0 {
 			rated++
-			ratingTotal += bestRating
+			ratingTotal += c.MythicRating
 			top = append(top, map[string]any{
 				"name":    c.DisplayName,
 				"realm":   c.Realm,
-				"rating":  bestRating,
-				"bestKey": bestKey,
+				"rating":  c.MythicRating,
+				"bestKey": row.BestKey,
 			})
 		}
-		for _, rp := range d.Raids {
+		for _, rp := range row.Raids {
 			if raids[rp.RaidName] == nil {
 				raids[rp.RaidName] = map[string]map[string]int{}
 			}
@@ -338,8 +333,8 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 				raids[rp.RaidName][rp.Difficulty]["progress"] = rp.Progress
 			}
 		}
-		if len(d.Snapshots) > 1 {
-			first, last := d.Snapshots[0], d.Snapshots[len(d.Snapshots)-1]
+		if row.SnapshotCount > 1 {
+			first, last := row.First, row.Last
 			if first.CapturedAt.Before(a.now().Add(-14*24*time.Hour)) &&
 				(last.MythicRating > first.MythicRating || last.ItemLevel > first.ItemLevel) {
 				notable = append(notable, map[string]any{

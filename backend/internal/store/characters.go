@@ -29,6 +29,19 @@ type CharacterPage struct {
 	Items []domain.Character
 	Total int
 }
+
+// DashboardCharacter pairs one character with the aggregates the dashboard
+// used to load through a per-character Detail call: the best keystone level
+// of the highest-rated mythic+ season, every raid progression row, and the
+// oldest and newest snapshots inside the retention window.
+type DashboardCharacter struct {
+	Character     domain.Character
+	BestKey       int
+	Raids         []domain.RaidProgression
+	SnapshotCount int
+	First         domain.Snapshot
+	Last          domain.Snapshot
+}
 type CharacterSort string
 
 const (
@@ -272,6 +285,81 @@ func (s CharacterStore) ListByGuild(ctx context.Context, guildID int64, f Charac
 
 func (s CharacterStore) ListPageByGuild(ctx context.Context, guildID int64, f CharacterFilter, limit, offset int, sort CharacterSort, descending bool) (CharacterPage, error) {
 	return s.listByGuild(ctx, guildID, f, limit, offset, sort, descending)
+}
+
+// DashboardByGuild loads every character of a guild plus the dashboard's
+// aggregates in ONE query: a single round trip replaces the per-character
+// Detail lookups. Rows come back grouped by character, ordered by display
+// name like the list view, so callers can aggregate in the same order.
+func (s CharacterStore) DashboardByGuild(ctx context.Context, guildID int64, since time.Time) ([]DashboardCharacter, error) {
+	rows, e := s.pool.Query(ctx, `SELECT
+		c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
+		COALESCE(c.class_id,0),COALESCE(c.class_name,''),
+		COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
+		COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
+		COALESCE(c.race_name,''),COALESCE(c.gender,''),
+		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0),
+		COALESCE((SELECT best_key_level FROM mythic_plus m WHERE m.character_id=c.id
+			ORDER BY overall_rating DESC,best_key_level DESC LIMIT 1),0),
+		COALESCE(c.synced_at,'epoch'),
+		COALESCE(r.raid_slug,''),COALESCE(r.raid_name,''),COALESCE(r.difficulty,''),
+		COALESCE(r.progress,0),COALESCE(r.total_bosses,0),
+		COALESCE(sc.cnt,0),
+		COALESCE(fs.captured_at,'epoch'),COALESCE(fs.item_level,0),COALESCE(fs.mythic_rating,0),
+		COALESCE(ls.captured_at,'epoch'),COALESCE(ls.item_level,0),COALESCE(ls.mythic_rating,0)
+		FROM characters c
+		LEFT JOIN raid_progression r ON r.character_id=c.id
+		LEFT JOIN LATERAL (SELECT COUNT(*) AS cnt FROM progression_snapshots ps
+			WHERE ps.character_id=c.id AND ps.captured_at >= $2) sc ON true
+		LEFT JOIN LATERAL (SELECT captured_at,item_level,mythic_rating FROM progression_snapshots ps
+			WHERE ps.character_id=c.id AND ps.captured_at >= $2 ORDER BY captured_at LIMIT 1) fs ON true
+		LEFT JOIN LATERAL (SELECT captured_at,item_level,mythic_rating FROM progression_snapshots ps
+			WHERE ps.character_id=c.id AND ps.captured_at >= $2 ORDER BY captured_at DESC LIMIT 1) ls ON true
+		WHERE c.guild_id=$1
+		ORDER BY c.display_name,c.id`, guildID, since)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []DashboardCharacter{}
+	for rows.Next() {
+		var (
+			c                    DashboardCharacter
+			raid                 domain.RaidProgression
+			raidSlug, raidName   string
+			firstAt, lastAt      time.Time
+			firstIl, firstRating float64
+			lastIl, lastRating   float64
+		)
+		if e = rows.Scan(
+			&c.Character.ID, &c.Character.GuildID,
+			&c.Character.Name, &c.Character.DisplayName, &c.Character.NormalizedName,
+			&c.Character.Realm, &c.Character.RealmSlug, &c.Character.Region,
+			&c.Character.ClassID, &c.Character.ClassName,
+			&c.Character.SpecID, &c.Character.SpecName,
+			&c.Character.Level, &c.Character.ItemLevel, &c.Character.GuildRank,
+			&c.Character.RaceName, &c.Character.Gender,
+			&c.Character.MythicRating, &c.BestKey, &c.Character.SyncedAt,
+			&raidSlug, &raidName, &raid.Difficulty, &raid.Progress, &raid.TotalBosses,
+			&c.SnapshotCount,
+			&firstAt, &firstIl, &firstRating,
+			&lastAt, &lastIl, &lastRating,
+		); e != nil {
+			return nil, e
+		}
+		// The laterals repeat per raid row, so only the first row of each
+		// character opens its group; raid rows attach to the current one.
+		if len(out) == 0 || out[len(out)-1].Character.ID != c.Character.ID {
+			c.First = domain.Snapshot{CharacterID: c.Character.ID, CapturedAt: firstAt, ItemLevel: firstIl, MythicRating: firstRating}
+			c.Last = domain.Snapshot{CharacterID: c.Character.ID, CapturedAt: lastAt, ItemLevel: lastIl, MythicRating: lastRating}
+			out = append(out, c)
+		}
+		if raidSlug != "" {
+			raid.RaidSlug, raid.RaidName, raid.CharacterID = raidSlug, raidName, c.Character.ID
+			out[len(out)-1].Raids = append(out[len(out)-1].Raids, raid)
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s CharacterStore) ListClassesByGuild(ctx context.Context, guildID int64) ([]string, error) {

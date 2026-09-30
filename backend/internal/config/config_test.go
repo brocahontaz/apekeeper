@@ -21,6 +21,7 @@ var configVariables = []string{
 	"OAUTH_REDIRECT_URL",
 	"SESSION_SECRET",
 	"SUPER_ADMIN_BATTLETAGS",
+	"DISCORD_WEBHOOK_URL",
 	"STATIC_DIR",
 }
 
@@ -118,6 +119,33 @@ func TestLoadParsesSnapshotRetentionDays(t *testing.T) {
 					t.Errorf("Load() error = %v, want positive integer validation error", err)
 				}
 			})
+		}
+	})
+}
+
+func TestLoadParsesDiscordWebhookURL(t *testing.T) {
+	t.Run("empty env defaults to no notifications", func(t *testing.T) {
+		setConfigEnv(t, validConfigEnv())
+
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if c.DiscordWebhookURL != "" {
+			t.Errorf("DiscordWebhookURL = %q, want empty", c.DiscordWebhookURL)
+		}
+	})
+	t.Run("set value is carried through", func(t *testing.T) {
+		values := validConfigEnv()
+		values["DISCORD_WEBHOOK_URL"] = "https://discord.com/api/webhooks/1/token"
+		setConfigEnv(t, values)
+
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if c.DiscordWebhookURL != "https://discord.com/api/webhooks/1/token" {
+			t.Errorf("DiscordWebhookURL = %q", c.DiscordWebhookURL)
 		}
 	})
 }

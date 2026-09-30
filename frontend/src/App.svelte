@@ -3,6 +3,7 @@
   import { match, navigate, type Route } from "$lib/router";
   import { client } from "$lib/api";
   import { currentUser } from "$lib/stores";
+  import { theme, toggleTheme } from "$lib/colorScheme";
   import Logo from "$components/Logo.svelte";
   import Dashboard from "$routes/Dashboard.svelte";
   import Roster from "$routes/Roster.svelte";
@@ -52,18 +53,24 @@
     </aside>
     <main>
       <header class="topbar">
-        <span>EXPEDITION LOG / {new Date().toLocaleDateString()}</span>{#if $currentUser}<span
-            >{$currentUser.battletag}
-            <b
-              >{$currentUser.appRole === "superadmin"
-                ? "Super Admin"
-                : $currentUser.appRole === "admin"
-                  ? "Guild Master"
-                  : $currentUser.appRole === "officer"
-                    ? "Officer"
-                    : "Ape"}</b
-            > <button onclick={logout}>Logout</button></span
-          >{/if}
+        <span>EXPEDITION LOG / {new Date().toLocaleDateString()}</span>
+        <span class="topbar-actions">
+          {#if $currentUser}<span
+              >{$currentUser.battletag}
+              <b
+                >{$currentUser.appRole === "superadmin"
+                  ? "Super Admin"
+                  : $currentUser.appRole === "admin"
+                    ? "Guild Master"
+                    : $currentUser.appRole === "officer"
+                      ? "Officer"
+                      : "Ape"}</b
+              > <button onclick={logout}>Logout</button></span
+            >{/if}
+          <button onclick={toggleTheme} aria-label="Toggle dark mode" title="Toggle dark mode"
+            >{$theme === "dark" ? "☀" : "☾"}</button
+          >
+        </span>
       </header>
       {#if active?.route.path === "/"}<Dashboard
         />{:else if active?.route.path === "/roster"}<Roster

@@ -12,7 +12,7 @@ Copy the example environment file and set the required values:
 cp .env.example .env
 ```
 
-`GUILD_REALM` is required (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth requires `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, and an OAuth application registration for the exact `OAUTH_REDIRECT_URL`. The default callback route is `http://localhost:5173/api/auth/callback` (`GET /api/auth/callback`): the browser authenticates on the frontend origin and the Vite dev server proxies `/api` to the backend, so after sign-in you land on the SPA at `http://localhost:5173` rather than the backend port.
+`GUILD_REALM` is required (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth requires `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, and an OAuth application registration for the exact `OAUTH_REDIRECT_URL`. The default callback route is `http://localhost:5173/api/auth/callback` (`GET /api/auth/callback`): the browser authenticates on the frontend origin and the Vite dev server proxies `/api` to the backend, so after sign-in you land on the SPA at `http://localhost:5173` rather than the backend port. The optional `DISCORD_WEBHOOK_URL` posts a summary of every finished sync run to a Discord channel webhook; leave it empty to disable notifications.
 
 ### Native backend and frontend
 
@@ -61,6 +61,8 @@ docs/      operations and architecture notes
 ```
 
 Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks. The platform-level `superadmin` role has at least every admin capability and is granted at sign-in to BattleTags listed in the optional `SUPER_ADMIN_BATTLETAGS` variable (comma-separated, trimmed); it is intended for the repository or platform owner rather than the guild's actual GM, who holds the `admin` ("Guild Master") role.
+
+The roster page exports the whole roster as a CSV download (Export CSV button), and the header toggle switches between light and dark themes; the choice is stored per browser and otherwise follows the system preference.
 
 A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETENTION_DAYS` (default 90) and expired sessions.
 

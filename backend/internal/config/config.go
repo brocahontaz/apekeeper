@@ -26,6 +26,7 @@ type Config struct {
 	OAuthRedirectURL      string
 	SessionSecret         string
 	SuperAdminBattleTags  []string
+	DiscordWebhookURL     string
 	StaticDir             string
 }
 
@@ -54,6 +55,7 @@ func Load() (Config, error) {
 		OAuthRedirectURL:      os.Getenv("OAUTH_REDIRECT_URL"),
 		SessionSecret:         os.Getenv("SESSION_SECRET"),
 		SuperAdminBattleTags:  parseBattleTags(os.Getenv("SUPER_ADMIN_BATTLETAGS")),
+		DiscordWebhookURL:     os.Getenv("DISCORD_WEBHOOK_URL"),
 		StaticDir:             os.Getenv("STATIC_DIR"),
 	}
 
