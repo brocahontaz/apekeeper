@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/notify"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
+	"github.com/brocahontaz/apekeeper/backend/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestServiceStartManualCreatesRunningRunBeforeQueueing(t *testing.T) {
@@ -38,25 +41,58 @@ func TestServiceStartManualCreatesRunningRunBeforeQueueing(t *testing.T) {
 	t.Fatalf("run did not complete: history=%+v err=%v", history, err)
 }
 
-// recordingNotifier captures the summary the service hands to a notifier;
-// NotifySyncRun runs in its own goroutine, so access is locked.
+// recordingNotifier captures the summary the service hands to a notifier and
+// replies with a configurable outcome; NotifySyncRun runs in its own
+// goroutine, so access is locked.
 type recordingNotifier struct {
-	mu   sync.Mutex
-	got  notify.SyncRunSummary
-	hits int
+	mu      sync.Mutex
+	got     notify.SyncRunSummary
+	hits    int
+	outcome notify.Outcome
 }
 
-func (r *recordingNotifier) NotifySyncRun(s notify.SyncRunSummary) {
+func (r *recordingNotifier) NotifySyncRun(s notify.SyncRunSummary) notify.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.got = s
 	r.hits++
+	return r.outcome
 }
 
 func (r *recordingNotifier) summary() (notify.SyncRunSummary, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.got, r.hits
+}
+
+// closingNotifier tears the engine's pool down mid-notification, forcing the
+// outcome persistence that follows to fail against a dead store.
+type closingNotifier struct {
+	pool *pgxpool.Pool
+}
+
+func (c *closingNotifier) NotifySyncRun(notify.SyncRunSummary) notify.Outcome {
+	c.pool.Close()
+	return notify.Outcome{Status: notify.OutcomeSent}
+}
+
+// assertNotifyStatus polls until the run's persisted notify status matches
+// want; the fan-out goroutine lands it asynchronously after Start returns.
+func assertNotifyStatus(t *testing.T, s store.Store, guildID, runID int64, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		history, err := s.SyncRuns.History(context.Background(), guildID, 10)
+		if err == nil {
+			for _, r := range history {
+				if r.ID == runID && r.NotifyStatus != nil && *r.NotifyStatus == want {
+					return
+				}
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("notify status %q never landed for run %d", want, runID)
 }
 
 // Every finished run — manual or scheduled — must fire one notification
@@ -107,4 +143,92 @@ func TestRunFailureReasons(t *testing.T) {
 	if len(overall) != 1 || overall[0] != "roster unavailable" {
 		t.Fatalf("reasons=%q, want the overall summary", overall)
 	}
+}
+
+// The notification outcome is pure bookkeeping: each returned outcome must
+// land in sync_runs and surface through History without ever touching the
+// run's own status or result.
+func TestServicePersistsNotifyOutcome(t *testing.T) {
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600})
+	notifier := &recordingNotifier{outcome: notify.Outcome{Status: notify.OutcomeSent}}
+	service := Service{Engine: e, Guild: g, Notifier: notifier}
+	first, err := service.Start(context.Background(), "manual")
+	if err != nil || first.Status != domain.RunSuccess {
+		t.Fatalf("run=%+v err=%v", first, err)
+	}
+	assertNotifyStatus(t, s, g.ID, first.ID, notify.OutcomeSent)
+	history, err := s.SyncRuns.History(context.Background(), g.ID, 10)
+	if err != nil || len(history) != 1 ||
+		history[0].ID != first.ID || history[0].Status != domain.RunSuccess ||
+		history[0].NotifyStatus == nil || *history[0].NotifyStatus != notify.OutcomeSent {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+
+	// A failed delivery outcome is recorded the same way, and the run that
+	// triggered it still finished successfully. The engine clock advances so
+	// the second run's snapshots get fresh capture timestamps.
+	service.Engine.Now = func() time.Time { return time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC) }
+	notifier.mu.Lock()
+	notifier.outcome = notify.Outcome{Status: notify.OutcomeFailed, Detail: "timeout"}
+	notifier.mu.Unlock()
+	second, err := service.Start(context.Background(), "manual")
+	if err != nil || second.Status != domain.RunSuccess {
+		t.Fatalf("second run=%+v err=%v", second, err)
+	}
+	assertNotifyStatus(t, s, g.ID, second.ID, notify.OutcomeFailed)
+	history, err = s.SyncRuns.History(context.Background(), g.ID, 10)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	if got := history[0].NotifyStatus; got == nil || *got != notify.OutcomeFailed {
+		t.Fatalf("newest run notifyStatus=%v, want failed", got)
+	}
+	if got := history[1].NotifyStatus; got == nil || *got != notify.OutcomeSent {
+		t.Fatalf("older run notifyStatus=%v, want sent", got)
+	}
+}
+
+// Failing notification bookkeeping must stay a logged warning: the run keeps
+// its stored result, the notify status stays absent, and nothing panics.
+func TestServiceNotifyPersistFailureIsLoggedNotFatal(t *testing.T) {
+	ctx := context.Background()
+	pool, dbURL := testdb.New(t)
+	s := store.New(pool)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "notify-persist", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second pool outlives the engine's so the assertions survive the
+	// forced store failure.
+	watch, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(watch.Close)
+
+	capture := &logCapture{}
+	service := Service{
+		Engine: Engine{Client: &fakeClient{ilvl: 600}, Stores: s, Workers: 1},
+		Guild:  g,
+		Log:    slog.New(capture),
+		// The notifier closes the pool before its outcome is persisted.
+		Notifier: &closingNotifier{pool: pool},
+	}
+	run, err := service.Start(ctx, "manual")
+	if err != nil || run.Status != domain.RunSuccess {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := capture.find(slog.LevelWarn, "sync notification status persist failed"); ok {
+			history, err := store.New(watch).SyncRuns.History(ctx, g.ID, 10)
+			if err != nil || len(history) != 1 ||
+				history[0].ID != run.ID || history[0].Status != domain.RunSuccess || history[0].NotifyStatus != nil {
+				t.Fatalf("history=%+v err=%v, want the run result untouched with no notify status", history, err)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("missing sync notification status persist failed record")
 }

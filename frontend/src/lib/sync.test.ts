@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { canTriggerSync, canViewRuns, failureDetails, type AppRole } from "$lib/sync";
+import {
+  canTriggerSync,
+  canViewRuns,
+  failureDetails,
+  notifyStatusChip,
+  type AppRole,
+} from "$lib/sync";
 
 describe("failureDetails", () => {
   it("parses a detail map into alphabetically sorted rows", () =>
@@ -26,6 +32,20 @@ describe("failureDetails", () => {
     ]));
 
   it("handles an empty detail map", () => expect(failureDetails({ detail: {} })).toEqual([]));
+});
+
+describe("notifyStatusChip", () => {
+  it("maps recorded delivery results onto labelled chips", () => {
+    expect(notifyStatusChip("sent")).toEqual({ label: "notify sent", kind: "up" });
+    expect(notifyStatusChip("skipped")).toEqual({ label: "notify skipped", kind: "stale" });
+    expect(notifyStatusChip("failed")).toEqual({ label: "notify failed", kind: "error" });
+  });
+
+  it("renders nothing when delivery was never recorded or is unknown", () => {
+    expect(notifyStatusChip(null)).toBeNull();
+    expect(notifyStatusChip(undefined)).toBeNull();
+    expect(notifyStatusChip("pending")).toBeNull();
+  });
 });
 
 describe("sync role gating", () => {

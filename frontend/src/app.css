@@ -133,6 +133,15 @@ nav a:hover {
   font-size: 10px;
   text-transform: uppercase;
 }
+.chip.up {
+  color: var(--up);
+}
+.chip.stale {
+  color: var(--muted);
+}
+.chip.error {
+  color: var(--error);
+}
 h1 {
   letter-spacing: 0.09em;
   font-size: 27px;
@@ -496,7 +505,12 @@ progress {
     padding: 0 16px 30px;
   }
   .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
     margin-bottom: 22px;
+  }
+  .topbar-actions {
+    flex-wrap: wrap;
   }
   .kpis {
     grid-template-columns: repeat(2, 1fr);

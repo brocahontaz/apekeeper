@@ -3,8 +3,8 @@
   import { match, navigate, type Route } from "$lib/router";
   import { client } from "$lib/api";
   import { currentUser } from "$lib/stores";
-  import { theme, toggleTheme } from "$lib/colorScheme";
   import Logo from "$components/Logo.svelte";
+  import ThemeToggle from "$components/ThemeToggle.svelte";
   import Dashboard from "$routes/Dashboard.svelte";
   import Roster from "$routes/Roster.svelte";
   import CharacterDetail from "$routes/CharacterDetail.svelte";
@@ -67,9 +67,7 @@
                       : "Ape"}</b
               > <button onclick={logout}>Logout</button></span
             >{/if}
-          <button onclick={toggleTheme} aria-label="Toggle dark mode" title="Toggle dark mode"
-            >{$theme === "dark" ? "☀" : "☾"}</button
-          >
+          <ThemeToggle />
         </span>
       </header>
       {#if active?.route.path === "/"}<Dashboard

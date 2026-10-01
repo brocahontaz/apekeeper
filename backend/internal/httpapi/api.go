@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -145,13 +146,13 @@ func (a API) me(w http.ResponseWriter, r *http.Request) {
 		"appRole":     u.Role,
 	})
 }
-func (a API) roster(w http.ResponseWriter, r *http.Request) {
-	g, e := a.guild(r.Context())
-	if e != nil {
-		fail(w, 500, "guild lookup failed")
-		return
-	}
-	q := r.URL.Query()
+
+// parseRosterQuery validates the roster filters, sort column, and sort
+// direction shared by the roster page and the CSV export. defaultSort applies
+// when the query omits sort, so each surface keeps its own default ordering.
+// An invalid sort or direction yields the same 400 messages the roster page
+// has always sent.
+func parseRosterQuery(q url.Values, staleBefore time.Time, defaultSort store.CharacterSort) (store.CharacterFilter, store.CharacterSort, bool, error) {
 	f := store.CharacterFilter{
 		Class: q.Get("class"),
 		Spec:  q.Get("spec"),
@@ -167,8 +168,33 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 		f.MinRating = &v
 	}
 	if q.Get("stale") == "true" {
-		x := a.now().Add(-7 * 24 * time.Hour)
-		f.StaleBefore = &x
+		f.StaleBefore = &staleBefore
+	}
+	sort, ok := store.ParseCharacterSort(q.Get("sort"))
+	if q.Get("sort") == "" {
+		sort = defaultSort
+	}
+	if !ok && q.Get("sort") != "" {
+		return f, sort, false, errors.New("invalid roster sort")
+	}
+	descending := q.Get("direction") == "descending"
+	if direction := q.Get("direction"); direction != "" && direction != "ascending" && direction != "descending" {
+		return f, sort, false, errors.New("invalid roster sort direction")
+	}
+	return f, sort, descending, nil
+}
+
+func (a API) roster(w http.ResponseWriter, r *http.Request) {
+	g, e := a.guild(r.Context())
+	if e != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	q := r.URL.Query()
+	f, sort, descending, e := parseRosterQuery(q, a.now().Add(-7*24*time.Hour), store.CharacterSortGuildRank)
+	if e != nil {
+		fail(w, 400, e.Error())
+		return
 	}
 	page, pageSize := 1, 25
 	if v, ok := integer(q.Get("page")); ok && v > 0 {
@@ -176,19 +202,6 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := integer(q.Get("pageSize")); ok && v > 0 && v <= 100 {
 		pageSize = v
-	}
-	sort, ok := store.ParseCharacterSort(q.Get("sort"))
-	if q.Get("sort") == "" {
-		sort = store.CharacterSortGuildRank
-	}
-	if !ok && q.Get("sort") != "" {
-		fail(w, 400, "invalid roster sort")
-		return
-	}
-	descending := q.Get("direction") == "descending"
-	if direction := q.Get("direction"); direction != "" && direction != "ascending" && direction != "descending" {
-		fail(w, 400, "invalid roster sort direction")
-		return
 	}
 	result, e := a.Stores.Characters.ListPageByGuild(r.Context(), g.ID, f, pageSize, (page-1)*pageSize, sort, descending)
 	if e != nil {
@@ -438,5 +451,3 @@ func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 202, map[string]any{"runId": id})
 }
-
-var _ = errors.New

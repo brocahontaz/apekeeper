@@ -48,6 +48,7 @@ export type SyncRun = {
   finishedAt: string | null;
   trigger: string;
   status: string;
+  notifyStatus?: string | null;
   total: number;
   updated: number;
   failed: number;

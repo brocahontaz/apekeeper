@@ -291,30 +291,67 @@ func (s CharacterStore) ListPageByGuild(ctx context.Context, guildID int64, f Ch
 // aggregates in ONE query: a single round trip replaces the per-character
 // Detail lookups. Rows come back grouped by character, ordered by display
 // name like the list view, so callers can aggregate in the same order.
+//
+// The aggregates are computed in per-character CTEs that are joined to the
+// characters LAST. The previous shape joined raid rows before the correlated
+// mythic+ subselects and the snapshot laterals, so a character with N raid
+// rows paid those aggregates N times; grouping first makes each character's
+// aggregates cost exactly once regardless of its raid count.
+//
+// No migration is required: mythic_plus UNIQUE(character_id,season_slug),
+// raid_progression UNIQUE(character_id,raid_slug,difficulty), and
+// progression_snapshots INDEX(character_id,captured_at) already give every
+// CTE a character-leading index to aggregate through.
 func (s CharacterStore) DashboardByGuild(ctx context.Context, guildID int64, since time.Time) ([]DashboardCharacter, error) {
-	rows, e := s.pool.Query(ctx, `SELECT
-		c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
-		COALESCE(c.class_id,0),COALESCE(c.class_name,''),
-		COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
-		COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
-		COALESCE(c.race_name,''),COALESCE(c.gender,''),
-		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0),
-		COALESCE((SELECT best_key_level FROM mythic_plus m WHERE m.character_id=c.id
-			ORDER BY overall_rating DESC,best_key_level DESC LIMIT 1),0),
-		COALESCE(c.synced_at,'epoch'),
-		COALESCE(r.raid_slug,''),COALESCE(r.raid_name,''),COALESCE(r.difficulty,''),
-		COALESCE(r.progress,0),COALESCE(r.total_bosses,0),
-		COALESCE(sc.cnt,0),
-		COALESCE(fs.captured_at,'epoch'),COALESCE(fs.item_level,0),COALESCE(fs.mythic_rating,0),
-		COALESCE(ls.captured_at,'epoch'),COALESCE(ls.item_level,0),COALESCE(ls.mythic_rating,0)
+	rows, e := s.pool.Query(ctx, `WITH guild_chars AS (
+			SELECT id FROM characters WHERE guild_id=$1
+		),
+		mythic AS (
+			SELECT m.character_id,
+				MAX(m.overall_rating) AS best_rating,
+				(array_agg(m.best_key_level ORDER BY m.overall_rating DESC,m.best_key_level DESC))[1] AS best_key
+			FROM mythic_plus m
+			JOIN guild_chars gc ON gc.id=m.character_id
+			GROUP BY m.character_id
+		),
+		raids AS (
+			SELECT r.character_id,
+				array_agg(r ORDER BY r.raid_slug,r.raid_name,r.difficulty) AS raid_rows
+			FROM raid_progression r
+			JOIN guild_chars gc ON gc.id=r.character_id
+			GROUP BY r.character_id
+		),
+		snaps AS (
+			SELECT p.character_id,
+				COUNT(*) AS cnt,
+				(array_agg(p ORDER BY p.captured_at))[1] AS first_snap,
+				(array_agg(p ORDER BY p.captured_at DESC))[1] AS last_snap
+			FROM progression_snapshots p
+			JOIN guild_chars gc ON gc.id=p.character_id
+			WHERE p.captured_at >= $2
+			GROUP BY p.character_id
+		)
+		SELECT
+			c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
+			COALESCE(c.class_id,0),COALESCE(c.class_name,''),
+			COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
+			COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
+			COALESCE(c.race_name,''),COALESCE(c.gender,''),
+			COALESCE(my.best_rating,0),
+			COALESCE(my.best_key,0),
+			COALESCE(c.synced_at,'epoch'),
+			COALESCE(rx.raid_slug,''),COALESCE(rx.raid_name,''),COALESCE(rx.difficulty,''),
+			COALESCE(rx.progress,0),COALESCE(rx.total_bosses,0),
+			COALESCE(sn.cnt,0),
+			COALESCE((sn.first_snap).captured_at,'epoch'),COALESCE((sn.first_snap).item_level,0),COALESCE((sn.first_snap).mythic_rating,0),
+			COALESCE((sn.last_snap).captured_at,'epoch'),COALESCE((sn.last_snap).item_level,0),COALESCE((sn.last_snap).mythic_rating,0)
 		FROM characters c
-		LEFT JOIN raid_progression r ON r.character_id=c.id
-		LEFT JOIN LATERAL (SELECT COUNT(*) AS cnt FROM progression_snapshots ps
-			WHERE ps.character_id=c.id AND ps.captured_at >= $2) sc ON true
-		LEFT JOIN LATERAL (SELECT captured_at,item_level,mythic_rating FROM progression_snapshots ps
-			WHERE ps.character_id=c.id AND ps.captured_at >= $2 ORDER BY captured_at LIMIT 1) fs ON true
-		LEFT JOIN LATERAL (SELECT captured_at,item_level,mythic_rating FROM progression_snapshots ps
-			WHERE ps.character_id=c.id AND ps.captured_at >= $2 ORDER BY captured_at DESC LIMIT 1) ls ON true
+		LEFT JOIN mythic my ON my.character_id=c.id
+		LEFT JOIN raids rd ON rd.character_id=c.id
+		LEFT JOIN snaps sn ON sn.character_id=c.id
+		-- The raid array expands after every aggregate has been attached, so
+		-- characters without raids survive the LEFT JOIN with a NULL composite.
+		LEFT JOIN LATERAL unnest(rd.raid_rows) AS rx ON true
 		WHERE c.guild_id=$1
 		ORDER BY c.display_name,c.id`, guildID, since)
 	if e != nil {
@@ -347,8 +384,9 @@ func (s CharacterStore) DashboardByGuild(ctx context.Context, guildID int64, sin
 		); e != nil {
 			return nil, e
 		}
-		// The laterals repeat per raid row, so only the first row of each
-		// character opens its group; raid rows attach to the current one.
+		// Rows are grouped by character with the raid array expanded after
+		// each one, so only the first row of each character opens its group;
+		// raid rows attach to the current one.
 		if len(out) == 0 || out[len(out)-1].Character.ID != c.Character.ID {
 			c.First = domain.Snapshot{CharacterID: c.Character.ID, CapturedAt: firstAt, ItemLevel: firstIl, MythicRating: firstRating}
 			c.Last = domain.Snapshot{CharacterID: c.Character.ID, CapturedAt: lastAt, ItemLevel: lastIl, MythicRating: lastRating}

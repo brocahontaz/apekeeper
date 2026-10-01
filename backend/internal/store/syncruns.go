@@ -20,6 +20,9 @@ type SyncRun struct {
 	Failed       int              `json:"failed"`
 	ErrorSummary string           `json:"errorSummary"`
 	Detail       json.RawMessage  `json:"detail"`
+	// NotifyStatus is the outcome of the post-run Discord fan-out; nil when
+	// the run predates notification tracking.
+	NotifyStatus *string `json:"notifyStatus"`
 }
 type SyncRunStore struct{ pool *pgxpool.Pool }
 
@@ -46,6 +49,14 @@ func (s SyncRunStore) Finish(ctx context.Context, r SyncRun) error {
 	return e
 }
 
+// SetNotifyStatus records the outcome of the post-run Discord fan-out. It is
+// best-effort bookkeeping: callers must treat a failure as a warning and
+// never let it change the run's stored status or result.
+func (s SyncRunStore) SetNotifyStatus(ctx context.Context, runID int64, status string) error {
+	_, e := s.pool.Exec(ctx, `UPDATE sync_runs SET notify_status=$2 WHERE id=$1`, runID, status)
+	return e
+}
+
 func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]SyncRun, error) {
 	rows, e := s.pool.Query(ctx, `SELECT
 		id,guild_id,started_at,finished_at,trigger,status,
@@ -53,7 +64,8 @@ func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]
 		COALESCE(characters_updated,0),
 		COALESCE(characters_failed,0),
 		COALESCE(error_summary,''),
-		COALESCE(detail,'{}')
+		COALESCE(detail,'{}'),
+		notify_status
 		FROM sync_runs
 		WHERE guild_id=$1
 		ORDER BY started_at DESC
@@ -68,6 +80,7 @@ func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]
 		e = rows.Scan(
 			&r.ID, &r.GuildID, &r.StartedAt, &r.FinishedAt, &r.Trigger, &r.Status,
 			&r.Total, &r.Updated, &r.Failed, &r.ErrorSummary, &r.Detail,
+			&r.NotifyStatus,
 		)
 		if e != nil {
 			return nil, e

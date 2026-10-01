@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,14 +19,24 @@ type logCapture struct {
 	mu      sync.Mutex
 	levels  []string
 	matches []string
+	// texts records each record's message plus its attributes so tests can
+	// assert that no sanitized value (e.g. a webhook URL) ever leaks.
+	texts []string
 }
 
 func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
 func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	b.WriteString(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Fprintf(&b, " %s=%v", a.Key, a.Value)
+		return true
+	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.levels = append(c.levels, r.Level.String())
 	c.matches = append(c.matches, r.Message)
+	c.texts = append(c.texts, b.String())
 	return nil
 }
 func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
@@ -36,6 +47,17 @@ func (c *logCapture) has(level, msg string) bool {
 	defer c.mu.Unlock()
 	for i, l := range c.levels {
 		if strings.EqualFold(l, level) && c.matches[i] == msg {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *logCapture) leaks(needle string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, t := range c.texts {
+		if strings.Contains(t, needle) {
 			return true
 		}
 	}
@@ -132,9 +154,12 @@ func TestDiscordNotifierSkipsEmptyWebhookURL(t *testing.T) {
 			return nil, errors.New("must not send")
 		})},
 	}
-	n.NotifySyncRun(summary())
+	o := n.NotifySyncRun(summary())
 	if sent {
 		t.Fatal("an empty webhook URL must skip delivery entirely")
+	}
+	if o.Status != OutcomeSkipped || o.Detail != "" {
+		t.Fatalf("outcome=%+v, want a detail-free skipped outcome", o)
 	}
 }
 
@@ -167,10 +192,13 @@ func TestDiscordNotifierPostsJSONAndLogsFailures(t *testing.T) {
 
 	logs := &logCapture{}
 	n := NewDiscord(srv.URL, slog.New(logs))
-	n.NotifySyncRun(summary())
+	o := n.NotifySyncRun(summary())
 	mu.Lock()
 	delivered, contentType := gotContent != "", gotType
 	mu.Unlock()
+	if o.Status != OutcomeSent || o.Detail != "" {
+		t.Fatalf("outcome=%+v, want a detail-free sent outcome", o)
+	}
 	if !delivered || !strings.HasPrefix(contentType, "application/json") {
 		t.Fatalf("delivery contentType=%q content=%q", contentType, gotContent)
 	}
@@ -178,11 +206,67 @@ func TestDiscordNotifierPostsJSONAndLogsFailures(t *testing.T) {
 		t.Fatal("a successful delivery must not log a failure")
 	}
 
-	// A rejected delivery logs at warn and never returns an error.
+	// A rejected delivery logs at warn, never returns an error, and reports
+	// a status-code-only detail that cannot carry the webhook URL.
 	n.URL = srv.URL + "/missing"
-	n.NotifySyncRun(summary())
+	o = n.NotifySyncRun(summary())
+	if o.Status != OutcomeFailed || o.Detail != "webhook returned 500" {
+		t.Fatalf("outcome=%+v, want failed with the status code only", o)
+	}
 	if !logs.has("warn", "discord notification rejected") {
 		t.Fatal("a rejected delivery must log a warning")
+	}
+	if logs.leaks(srv.URL) {
+		t.Fatal("a rejected delivery must not log the webhook URL")
+	}
+}
+
+// A transport failure — here a server that is already gone — must report a
+// failed outcome whose detail and logs classify the error without ever
+// carrying the webhook URL or its token.
+func TestDiscordNotifierNetworkFailureSanitizesDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	logs := &logCapture{}
+	n := NewDiscord(url, slog.New(logs))
+	o := n.NotifySyncRun(summary())
+	if o.Status != OutcomeFailed || o.Detail == "" {
+		t.Fatalf("outcome=%+v, want a failed outcome with a detail", o)
+	}
+	if strings.Contains(o.Detail, url) || strings.Contains(o.Detail, "http") {
+		t.Fatalf("detail=%q, want an error class without the webhook URL", o.Detail)
+	}
+	if logs.leaks(url) {
+		t.Fatal("a failed delivery must not log the webhook URL")
+	}
+}
+
+// A hung webhook must not hang the caller: with a tiny client timeout the
+// delivery gives up quickly and reports a failed, sanitized outcome.
+func TestDiscordNotifierTimeoutBoundsDelivery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		// Sleep long past the injected timeout, but short enough to keep the
+		// test fast; Server.Close still reaps it cleanly.
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	logs := &logCapture{}
+	n := NewDiscord(srv.URL, slog.New(logs))
+	n.HTTP = &http.Client{Timeout: 50 * time.Millisecond}
+	start := time.Now()
+	o := n.NotifySyncRun(summary())
+	elapsed := time.Since(start)
+	if o.Status != OutcomeFailed || !strings.Contains(o.Detail, "timeout") {
+		t.Fatalf("outcome=%+v, want failed with a timeout detail", o)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("delivery took %v, want it bounded near the 50ms client timeout", elapsed)
+	}
+	if strings.Contains(o.Detail, srv.URL) || logs.leaks(srv.URL) {
+		t.Fatal("a timed-out delivery must not leak the webhook URL")
 	}
 }
 
