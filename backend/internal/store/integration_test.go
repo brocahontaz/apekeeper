@@ -108,20 +108,32 @@ func TestDashboardByGuildAggregatesCharactersAndProgression(t *testing.T) {
 		}
 		return c
 	}
-	one, two := upsert("One"), upsert("Two")
+	one, two, three := upsert("One"), upsert("Two"), upsert("Three")
 	// Season one carries the higher keystone level but the lower rating; the
 	// dashboard's BestKey must come from the best-rated row, not the max key.
 	for _, m := range []domain.MythicPlus{
 		{CharacterID: one.ID, SeasonSlug: "one", OverallRating: 1000, BestKeyLevel: 15, SyncedAt: now},
 		{CharacterID: one.ID, SeasonSlug: "two", OverallRating: 2000, BestKeyLevel: 12, SyncedAt: now},
+		{CharacterID: three.ID, SeasonSlug: "one", OverallRating: 1000, BestKeyLevel: 20, SyncedAt: now},
+		{CharacterID: three.ID, SeasonSlug: "two", OverallRating: 3000, BestKeyLevel: 8, SyncedAt: now},
 	} {
 		if err := s.Progression.UpsertMythicPlus(ctx, m); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// Three's raid rows are inserted out of slug order so the dashboard's
+	// deterministic raid ordering is observable, and Three carries raid rows
+	// AND multiple mythic seasons at once — the shape that repeated the
+	// correlated aggregates per raid row before the grouped rewrite.
 	if err := s.Progression.ReplaceRaids(ctx, two.ID, []domain.RaidProgression{
 		{CharacterID: two.ID, RaidSlug: "raid-a", RaidName: "Raid A", Difficulty: "heroic", Progress: 4, TotalBosses: 8, SyncedAt: now},
 		{CharacterID: two.ID, RaidSlug: "raid-b", RaidName: "Raid B", Difficulty: "normal", Progress: 2, TotalBosses: 5, SyncedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progression.ReplaceRaids(ctx, three.ID, []domain.RaidProgression{
+		{CharacterID: three.ID, RaidSlug: "raid-zeta", RaidName: "Raid Zeta", Difficulty: "normal", Progress: 1, TotalBosses: 5, SyncedAt: now},
+		{CharacterID: three.ID, RaidSlug: "raid-alpha", RaidName: "Raid Alpha", Difficulty: "heroic", Progress: 3, TotalBosses: 8, SyncedAt: now},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +142,9 @@ func TestDashboardByGuildAggregatesCharactersAndProgression(t *testing.T) {
 		{CharacterID: two.ID, CapturedAt: old, ItemLevel: 400, MythicRating: 100, RaidProgress: []byte("[]")},
 		{CharacterID: two.ID, CapturedAt: mid, ItemLevel: 500, MythicRating: 1500, RaidProgress: []byte("[]")},
 		{CharacterID: two.ID, CapturedAt: fresh, ItemLevel: 600, MythicRating: 2000, RaidProgress: []byte("[]")},
+		{CharacterID: three.ID, CapturedAt: old, ItemLevel: 400, MythicRating: 100, RaidProgress: []byte("[]")},
+		{CharacterID: three.ID, CapturedAt: now.AddDate(0, 0, -10), ItemLevel: 500, MythicRating: 1200, RaidProgress: []byte("[]")},
+		{CharacterID: three.ID, CapturedAt: now.AddDate(0, 0, -1), ItemLevel: 700, MythicRating: 2500, RaidProgress: []byte("[]")},
 	} {
 		if err := s.Progression.InsertSnapshot(ctx, snap); err != nil {
 			t.Fatal(err)
@@ -139,7 +154,10 @@ func TestDashboardByGuildAggregatesCharactersAndProgression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0].Character.DisplayName != "One" || rows[1].Character.DisplayName != "Two" {
+	if len(rows) != 3 ||
+		rows[0].Character.DisplayName != "One" ||
+		rows[1].Character.DisplayName != "Three" ||
+		rows[2].Character.DisplayName != "Two" {
 		t.Fatalf("rows=%+v", rows)
 	}
 	if rows[0].Character.MythicRating != 2000 || rows[0].BestKey != 12 {
@@ -148,15 +166,28 @@ func TestDashboardByGuildAggregatesCharactersAndProgression(t *testing.T) {
 	if len(rows[0].Raids) != 0 || rows[0].SnapshotCount != 0 {
 		t.Fatalf("One raids=%d snapshots=%d, want none", len(rows[0].Raids), rows[0].SnapshotCount)
 	}
+	if rows[1].Character.MythicRating != 3000 || rows[1].BestKey != 8 {
+		t.Fatalf("Three mythic=%v bestKey=%d, want rating 3000 with key 8 from the season-two row", rows[1].Character.MythicRating, rows[1].BestKey)
+	}
 	if len(rows[1].Raids) != 2 ||
-		rows[1].Raids[0].RaidSlug != "raid-a" || rows[1].Raids[1].RaidSlug != "raid-b" {
-		t.Fatalf("Two raids=%+v", rows[1].Raids)
+		rows[1].Raids[0].RaidSlug != "raid-alpha" || rows[1].Raids[1].RaidSlug != "raid-zeta" {
+		t.Fatalf("Three raids=%+v, want both rows in slug order", rows[1].Raids)
 	}
 	if rows[1].SnapshotCount != 2 ||
-		!rows[1].First.CapturedAt.Equal(mid) || rows[1].First.ItemLevel != 500 ||
-		!rows[1].Last.CapturedAt.Equal(fresh) || rows[1].Last.MythicRating != 2000 {
-		t.Fatalf("Two snapshots count=%d first=%+v last=%+v, want the two in-window snapshots",
+		!rows[1].First.CapturedAt.Equal(now.AddDate(0, 0, -10)) || rows[1].First.ItemLevel != 500 ||
+		!rows[1].Last.CapturedAt.Equal(now.AddDate(0, 0, -1)) || rows[1].Last.ItemLevel != 700 {
+		t.Fatalf("Three snapshots count=%d first=%+v last=%+v, want the two in-window snapshots",
 			rows[1].SnapshotCount, rows[1].First, rows[1].Last)
+	}
+	if len(rows[2].Raids) != 2 ||
+		rows[2].Raids[0].RaidSlug != "raid-a" || rows[2].Raids[1].RaidSlug != "raid-b" {
+		t.Fatalf("Two raids=%+v", rows[2].Raids)
+	}
+	if rows[2].SnapshotCount != 2 ||
+		!rows[2].First.CapturedAt.Equal(mid) || rows[2].First.ItemLevel != 500 ||
+		!rows[2].Last.CapturedAt.Equal(fresh) || rows[2].Last.MythicRating != 2000 {
+		t.Fatalf("Two snapshots count=%d first=%+v last=%+v, want the two in-window snapshots",
+			rows[2].SnapshotCount, rows[2].First, rows[2].Last)
 	}
 }
 

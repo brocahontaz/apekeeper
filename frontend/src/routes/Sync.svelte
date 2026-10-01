@@ -2,7 +2,12 @@
   import { client, ApiError, type SyncRun } from "$lib/api";
   import { relativeTime } from "$lib/format";
   import { currentUser } from "$lib/stores";
-  import { canTriggerSync, canViewRuns as canViewRunsFor, failureDetails } from "$lib/sync";
+  import {
+    canTriggerSync,
+    canViewRuns as canViewRunsFor,
+    failureDetails,
+    notifyStatusChip,
+  } from "$lib/sync";
   let runs = $state<SyncRun[]>([]);
   let error = $state("");
   let busy = $state(false);
@@ -45,7 +50,7 @@
     >{/if}
   <p>Scheduled runs keep the ledger fresh nightly at 03:00 UTC.</p>
 </section>
-{#if error}<p class="error">{error}</p>{/if}
+{#if error}<p class="error" role="status">{error}</p>{/if}
 {#if role === "member"}<section>
     <h2>Sync run history</h2>
     <p class="restricted">
@@ -62,10 +67,11 @@
             >
           </tr></thead
         ><tbody
-          >{#each runs as run}<tr
+          >{#each runs as run}{@const notify = notifyStatusChip(run.notifyStatus)}<tr
               ><td>{relativeTime(run.startedAt)}</td><td>{run.trigger}</td><td
-                ><span class="chip">{run.status}</span
-                >{#if run.failed > 0 && run.errorSummary}<small class="error-line"
+                ><span class="chip">{run.status}</span>{#if notify}<span class="chip {notify.kind}"
+                    >{notify.label}</span
+                  >{/if}{#if run.failed > 0 && run.errorSummary}<small class="error-line"
                     >{run.errorSummary}</small
                   >{/if}</td
               ><td>{run.updated}</td><td>{run.failed}</td><td>{run.total}</td></tr
@@ -81,7 +87,8 @@
                     </ul>
                   </details>
                 </td></tr
-              >{/if}{:else}<tr><td colspan="6">No sync runs recorded.</td></tr>{/each}</tbody
+              >{/if}{:else}<tr><td colspan="6" aria-live="polite">No sync runs recorded.</td></tr
+            >{/each}</tbody
         >
       </table>
     </div>

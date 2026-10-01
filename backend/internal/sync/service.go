@@ -13,10 +13,11 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 )
 
-// Notifier receives a summary after each finished run. Implementations must
-// be safe for concurrent use and must never block the sync result.
+// Notifier receives a summary after each finished run and reports what its
+// delivery attempt did. Implementations must be safe for concurrent use and
+// must never block or fail the sync result.
 type Notifier interface {
-	NotifySyncRun(notify.SyncRunSummary)
+	NotifySyncRun(notify.SyncRunSummary) notify.Outcome
 }
 
 type Service struct {
@@ -107,7 +108,31 @@ func (s *Service) complete(r store.SyncRun) {
 			Duration: time.Since(started),
 			Reasons:  runFailureReasons(r),
 		}
-		go s.Notifier.NotifySyncRun(summary)
+		go s.recordNotification(summary, r.ID)
+	}
+}
+
+// recordNotification sends one notification and logs plus persists its
+// outcome, best-effort on both counts: neither the delivery nor the
+// bookkeeping may change the run's stored status or result, and no logged
+// value ever carries the webhook URL.
+func (s *Service) recordNotification(summary notify.SyncRunSummary, runID int64) {
+	o := s.Notifier.NotifySyncRun(summary)
+	if s.Log != nil {
+		switch o.Status {
+		case notify.OutcomeFailed:
+			s.Log.Warn("sync notification failed", "runId", runID, "detail", o.Detail)
+		default:
+			s.Log.Info("sync notification outcome", "runId", runID, "status", o.Status)
+		}
+	}
+	// A detached context with its own deadline: the caller's request may be
+	// gone by the time the fan-out lands, but the outcome still deserves a
+	// bounded write attempt.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if e := s.Engine.Stores.SyncRuns.SetNotifyStatus(ctx, runID, o.Status); e != nil && s.Log != nil {
+		s.Log.Warn("sync notification status persist failed", "runId", runID, "error", e)
 	}
 }
 

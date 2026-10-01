@@ -13,19 +13,30 @@ import (
 )
 
 // rosterExport streams the whole roster as a CSV download. It carries the
-// same auth guard as the roster page and reuses the roster list query without
-// pagination, so every row is exported.
+// same auth guard as the roster page and honors the same validated filters
+// and sort as the roster view, so the export always matches what the officer
+// sees; pagination is dropped (limit 0) so every matching row exports.
+// Validation failures answer with the roster JSON 400s BEFORE any CSV header
+// is written, so the error stays machine-readable.
 func (a API) rosterExport(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
 	if e != nil {
 		fail(w, 500, "guild lookup failed")
 		return
 	}
-	chars, e := a.Stores.Characters.ListByGuild(r.Context(), g.ID, store.CharacterFilter{})
+	// The export's default sort stays the name order the unfiltered export
+	// has always used.
+	f, sort, descending, e := parseRosterQuery(r.URL.Query(), a.now().Add(-7*24*time.Hour), store.CharacterSortName)
+	if e != nil {
+		fail(w, 400, e.Error())
+		return
+	}
+	page, e := a.Stores.Characters.ListPageByGuild(r.Context(), g.ID, f, 0, 0, sort, descending)
 	if e != nil {
 		fail(w, 500, "roster lookup failed")
 		return
 	}
+	chars := page.Items
 	name := fmt.Sprintf("roster-%s-%s.csv", g.Slug, a.now().UTC().Format("20060102"))
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, name))

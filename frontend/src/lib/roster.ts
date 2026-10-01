@@ -55,3 +55,15 @@ export function rosterQuery(
     query.set("minRating", String(filters.minRating));
   return query;
 }
+
+// The export endpoint always returns the whole matching set server-side, so
+// the export link carries the active filters and ordering but never
+// pagination; placeholder page values satisfy rosterQuery and are stripped.
+export function rosterExportQuery(
+  filters: Omit<Parameters<typeof rosterQuery>[0], "page" | "pageSize">,
+) {
+  const query = rosterQuery({ ...filters, page: 0, pageSize: 0 });
+  query.delete("page");
+  query.delete("pageSize");
+  return query;
+}

@@ -395,6 +395,89 @@ func TestStoreBackedHandlers(t *testing.T) {
 			}
 		}
 	})
+	t.Run("roster export honors roster filters and sort", func(t *testing.T) {
+		// Distinct levels make the level sort observable in the CSV order;
+		// ranks keep the seeded values so the default-order subtest above and
+		// this one stay independent.
+		assertStatus(t, h, http.MethodGet, "/api/roster/export?sort=level", "", http.StatusUnauthorized)
+		levels := map[string]int{"Alpha": 70, "Beta": 60, "Gamma": 50}
+		for _, c := range []domain.Character{alpha, beta, gamma} {
+			c.Level = levels[c.DisplayName]
+			if _, err := stores.Characters.UpsertByGuildIdentity(ctx, c, []byte("{}")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r := request(h, http.MethodGet, "/api/roster/export?class=Mage", member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		lines := strings.Split(strings.TrimSuffix(r.Body.String(), "\n"), "\n")
+		if len(lines) != 2 || !strings.HasPrefix(lines[1], "Alpha,") {
+			t.Fatalf("class-filtered csv=%q, want only Alpha", r.Body.String())
+		}
+		for _, tc := range []struct {
+			direction string
+			want      []string
+		}{
+			{"descending", []string{"Alpha", "Beta", "Gamma"}},
+			{"ascending", []string{"Gamma", "Beta", "Alpha"}},
+		} {
+			r := request(h, http.MethodGet, "/api/roster/export?sort=level&direction="+tc.direction, member)
+			if r.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+			}
+			lines := strings.Split(strings.TrimSuffix(r.Body.String(), "\n"), "\n")
+			if len(lines) != 4 {
+				t.Fatalf("csv lines=%d", len(lines))
+			}
+			for i, want := range tc.want {
+				if !strings.HasPrefix(lines[i+1], want+",") {
+					t.Fatalf("%s csv row %d=%q, want it to start with %s", tc.direction, i+1, lines[i+1], want)
+				}
+			}
+		}
+		// Invalid sort or direction answers with the roster JSON 400 error
+		// before any CSV header is written.
+		for _, tc := range []struct {
+			query, wantErr string
+		}{
+			{"sort=drop%20table", "invalid roster sort"},
+			{"direction=sideways", "invalid roster sort direction"},
+		} {
+			r := request(h, http.MethodGet, "/api/roster/export?"+tc.query, member)
+			if r.Code != http.StatusBadRequest {
+				t.Fatalf("%s status=%d body=%s", tc.query, r.Code, r.Body.String())
+			}
+			if ct := r.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("%s content-type=%q, want the JSON error", tc.query, ct)
+			}
+			if got := decodeBody(t, r).(map[string]any)["error"]; got != tc.wantErr {
+				t.Fatalf("%s error=%v, want %q", tc.query, got, tc.wantErr)
+			}
+		}
+	})
+	t.Run("roster export of an empty roster", func(t *testing.T) {
+		empty, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "empty", Name: "Empty", Realm: "Area 52", Region: "us"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := New(API{
+			Stores:    stores,
+			Auth:      manager,
+			GuildSlug: empty.Slug,
+			Now: func() time.Time {
+				return now
+			},
+		})
+		r := request(h, http.MethodGet, "/api/roster/export", member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		want := "Name,Realm,Class,Spec,Level,Guild Rank,Item Level,M+ Rating,Best Key,Stale,Last Seen\n"
+		if r.Body.String() != want {
+			t.Fatalf("csv=%q, want a header-only export", r.Body.String())
+		}
+	})
 }
 
 func seedCharacter(

@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { client, type Character } from "$lib/api";
-  import { rosterQuery, type RosterDirection, type RosterSort } from "$lib/roster";
+  import {
+    rosterQuery,
+    rosterExportQuery,
+    type RosterDirection,
+    type RosterSort,
+  } from "$lib/roster";
   import { debounce } from "$lib/debounce";
   import RosterTable from "$components/RosterTable.svelte";
   const url = new URLSearchParams(location.search);
@@ -145,13 +150,30 @@
       stale = false;
       update();
     }}>Clear</button
-  ><a class="export" href="/api/roster/export" download>Export CSV</a>
+  ><a
+    class="export"
+    href="/api/roster/export?{rosterExportQuery({
+      search,
+      class: klass,
+      spec,
+      minLevel: minLevel ?? undefined,
+      minRating: minRating ?? undefined,
+      stale,
+      sort,
+      direction,
+    })}"
+    download>Export CSV</a
+  >
 </div>
-{#if error}<p class="error">{error}</p>{:else if loading}<p class="skeleton">
+{#if error}<p class="error" role="status">{error}</p>{:else if loading}<p
+    class="skeleton"
+    role="status"
+  >
     Loading roster…
   </p>{:else}<p class="count">{total} apes found · page {page} of {pageCount}</p>
   {#if rows.length}<RosterTable {rows} {sort} {direction} onSort={changeSort} />{:else}<p
       class="empty"
+      role="status"
     >
       No apes found.
     </p>{/if}

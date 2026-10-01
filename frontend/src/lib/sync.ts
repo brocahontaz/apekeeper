@@ -17,3 +17,19 @@ export function failureDetails(run: Pick<SyncRun, "detail">): FailureDetail[] {
     .map(([name, error]) => ({ name, error }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+export type NotifyChip = { label: string; kind: "up" | "stale" | "error" };
+// Maps a run's additive notifyStatus onto a chip beside the run status;
+// unknown or never-recorded values (null/absent) render nothing at all.
+export function notifyStatusChip(status: string | null | undefined): NotifyChip | null {
+  switch (status) {
+    case "sent":
+      return { label: "notify sent", kind: "up" };
+    case "skipped":
+      return { label: "notify skipped", kind: "stale" };
+    case "failed":
+      return { label: "notify failed", kind: "error" };
+    default:
+      return null;
+  }
+}
