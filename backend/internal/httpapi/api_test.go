@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -478,6 +479,130 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("csv=%q, want a header-only export", r.Body.String())
 		}
 	})
+}
+
+// fakeProgress stands in for the sync service's live snapshot so the handler
+// can be checked without wiring the whole engine.
+type fakeProgress struct{ snap domain.Progress }
+
+func (f fakeProgress) Progress() domain.Progress { return f.snap }
+
+type fakeOperations struct{ cancelErr error }
+
+func (f fakeOperations) StartDryRun(context.Context) (store.SyncRun, error) {
+	return store.SyncRun{ID: 43}, nil
+}
+func (f fakeOperations) StartRetry(_ context.Context, id int64) (store.SyncRun, error) {
+	if id == 99 {
+		return store.SyncRun{}, errors.New("retry unavailable")
+	}
+	return store.SyncRun{ID: 44}, nil
+}
+func (f fakeOperations) Cancel() error { return f.cancelErr }
+
+func TestSyncProgressEndpoint(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testdb.New(t)
+	stores := store.New(pool)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "progress", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
+	member := seedSession(t, ctx, pool, stores, "member", "member")
+	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
+	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
+	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin")
+
+	// No progress source wired: the endpoint still answers for the roles the
+	// history endpoint allows, with the idle shape.
+	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug})
+
+	t.Run("progress requires officer and above", func(t *testing.T) {
+		assertStatus(t, h, http.MethodGet, "/api/sync/progress", "", http.StatusUnauthorized)
+		assertStatus(t, h, http.MethodGet, "/api/sync/progress", member, http.StatusForbidden)
+		assertStatus(t, h, http.MethodGet, "/api/sync/progress", officer, http.StatusOK)
+		assertStatus(t, h, http.MethodGet, "/api/sync/progress", admin, http.StatusOK)
+		assertStatus(t, h, http.MethodGet, "/api/sync/progress", superadmin, http.StatusOK)
+	})
+
+	t.Run("idle shape without a wired source", func(t *testing.T) {
+		r := request(h, http.MethodGet, "/api/sync/progress", officer)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		body := decodeBody(t, r).(map[string]any)
+		want := map[string]any{
+			"active": false, "runId": float64(0), "status": "", "phase": "",
+			"total": float64(0), "updated": float64(0), "failed": float64(0),
+			"dryRun": false,
+		}
+		for k, v := range want {
+			if body[k] != v {
+				t.Fatalf("idle progress[%s]=%v, want %v", k, body[k], v)
+			}
+		}
+	})
+
+	t.Run("live snapshot shape from a wired source", func(t *testing.T) {
+		live := New(API{
+			Stores:    stores,
+			Auth:      manager,
+			GuildSlug: guild.Slug,
+			Progress: fakeProgress{domain.Progress{
+				Active:    true,
+				RunID:     7,
+				Status:    domain.RunRunning,
+				Phase:     domain.PhaseCharacters,
+				Total:     42,
+				Updated:   30,
+				Failed:    2,
+				StartedAt: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+			}},
+		})
+		r := request(live, http.MethodGet, "/api/sync/progress", officer)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		body := decodeBody(t, r).(map[string]any)
+		want := map[string]any{
+			"active": true, "runId": float64(7), "status": "running", "phase": "characters",
+			"total": float64(42), "updated": float64(30), "failed": float64(2),
+			"dryRun": false,
+		}
+		for k, v := range want {
+			if body[k] != v {
+				t.Fatalf("progress[%s]=%v, want %v", k, body[k], v)
+			}
+		}
+		if _, ok := body["startedAt"].(string); !ok {
+			t.Fatalf("progress startedAt=%v, want a string timestamp", body["startedAt"])
+		}
+	})
+}
+
+func TestSyncOperationEndpointsRequireAdmin(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testdb.New(t)
+	stores := store.New(pool)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "operations", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
+	member := seedSession(t, ctx, pool, stores, "member", "member")
+	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
+	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Operations: fakeOperations{}})
+	for _, path := range []string{"/api/sync/dry-run", "/api/sync/runs/1/retry", "/api/sync/cancel"} {
+		assertStatus(t, h, http.MethodPost, path, "", http.StatusUnauthorized)
+		assertStatus(t, h, http.MethodPost, path, member, http.StatusForbidden)
+	}
+	for _, path := range []string{"/api/sync/dry-run", "/api/sync/runs/1/retry", "/api/sync/cancel"} {
+		assertStatus(t, h, http.MethodPost, path, admin, http.StatusAccepted)
+	}
+	assertStatus(t, h, http.MethodPost, "/api/sync/runs/nope/retry", admin, http.StatusBadRequest)
+	assertStatus(t, h, http.MethodPost, "/api/sync/runs/99/retry", admin, http.StatusConflict)
+	assertStatus(t, New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Operations: fakeOperations{cancelErr: errors.New("none")}}), http.MethodPost, "/api/sync/cancel", admin, http.StatusConflict)
 }
 
 func seedCharacter(

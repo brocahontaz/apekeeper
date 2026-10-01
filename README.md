@@ -62,6 +62,10 @@ docs/      operations and architecture notes
 
 Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. When `DISCORD_WEBHOOK_URL` is set, each finished run's notification outcome (sent, skipped, or failed) is recorded on the run and shown in the officer sync-run history. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks. The platform-level `superadmin` role has at least every admin capability and is granted at sign-in to BattleTags listed in the optional `SUPER_ADMIN_BATTLETAGS` variable (comma-separated, trimmed); it is intended for the repository or platform owner rather than the guild's actual GM, who holds the `admin` ("Guild Master") role.
 
+## Sync operations
+
+Officers can poll `GET /api/sync/progress` and `GET /api/sync/runs` for a live, safe run summary. Administrators (and superadmins) may start `POST /api/sync/run`, validate without writes through `POST /api/sync/dry-run`, retry the recorded failed characters with `POST /api/sync/runs/{id}/retry`, and request cancellation through `POST /api/sync/cancel`. The SPA polls progress while a run is active. Only one run is admitted at a time; cancellation and process shutdown propagate a context to the engine, then wait for its work to settle. Dry runs remain in the audit ledger with the `dry-run` trigger but do not alter character, progression, or snapshot data.
+
 The roster page exports the roster as a CSV download (Export CSV link) matching the current view: the active filters and sort ordering apply to the export, so what you see is what you get. The header toggle switches between light and dark themes; the choice is stored per browser and otherwise follows the system preference.
 
 A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETENTION_DAYS` (default 90) and expired sessions.

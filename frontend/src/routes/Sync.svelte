@@ -1,42 +1,127 @@
 <script lang="ts">
-  import { client, ApiError, type SyncRun } from "$lib/api";
+  import { client, ApiError, type SyncProgress, type SyncRun } from "$lib/api";
   import { relativeTime } from "$lib/format";
   import { currentUser } from "$lib/stores";
   import {
     canTriggerSync,
     canViewRuns as canViewRunsFor,
+    canViewProgress as canViewProgressFor,
     failureDetails,
     notifyStatusChip,
+    phaseLabel,
+    progressActive,
   } from "$lib/sync";
   let runs = $state<SyncRun[]>([]);
   let error = $state("");
   let busy = $state(false);
   let loaded = $state(false);
+  let progress = $state<SyncProgress | null>(null);
+  let polling = $state(false);
   let role = $derived($currentUser?.appRole);
   let canTrigger = $derived(canTriggerSync(role));
   let canViewRuns = $derived(canViewRunsFor(role));
+  let canViewProgress = $derived(canViewProgressFor(role));
   $effect(() => {
     if (canViewRuns && !loaded) load();
+  });
+  // Live progress polls while a run is in flight and stops on its own once
+  // the snapshot goes terminal, so a manual run transitions without a
+  // refresh and the finished row takes over.
+  $effect(() => {
+    if (!polling || !canViewProgress) return;
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => clearInterval(timer);
   });
   async function load() {
     try {
       runs = await client.runs();
       loaded = true;
+      if (runs[0]?.status === "running") startPolling();
     } catch (e) {
       error = e instanceof Error ? e.message : "Sync history unavailable";
+    }
+  }
+  function startPolling() {
+    if (canViewProgress) polling = true;
+  }
+  function stopPolling() {
+    polling = false;
+    progress = null;
+  }
+  async function poll() {
+    try {
+      const p = await client.progress();
+      progress = p;
+      if (!progressActive(p)) {
+        stopPolling();
+        await load();
+      }
+    } catch {
+      // A failed poll ends the live view quietly; the history table still
+      // holds the last recorded state.
+      stopPolling();
     }
   }
   async function trigger() {
     if (!confirm("Start a full guild sync?")) return;
     busy = true;
+    error = "";
     try {
       await client.sync();
       await load();
+      startPolling();
     } catch (e) {
-      error = e instanceof ApiError ? e.message : "Sync could not start";
+      error = triggerError(e);
     } finally {
       busy = false;
     }
+  }
+  async function dryRun() {
+    busy = true;
+    error = "";
+    try {
+      await client.dryRun();
+      await load();
+      startPolling();
+    } catch (e) {
+      error = triggerError(e);
+    } finally {
+      busy = false;
+    }
+  }
+  async function cancel() {
+    busy = true;
+    error = "";
+    try {
+      await client.cancel();
+      startPolling();
+    } catch (e) {
+      error = triggerError(e);
+    } finally {
+      busy = false;
+    }
+  }
+  async function retry(run: SyncRun) {
+    busy = true;
+    error = "";
+    try {
+      await client.retry(run.id);
+      await load();
+      startPolling();
+    } catch (e) {
+      error = triggerError(e);
+    } finally {
+      busy = false;
+    }
+  }
+  function triggerError(e: unknown): string {
+    if (e instanceof ApiError) {
+      if (e.status === 409) return "A sync is already running";
+      if (e.status === 503) return "Sync unavailable";
+      return e.message;
+    }
+    return "Sync could not start";
   }
 </script>
 
@@ -45,12 +130,26 @@
   <h2>Guild expedition sync</h2>
   {#if canTrigger}<button class="gold" disabled={busy} onclick={trigger}
       >{busy ? "Dispatching…" : "Trigger full sync"}</button
+    ><button disabled={busy} onclick={dryRun}>Dry run</button
+    >{#if progress && progressActive(progress)}<button disabled={busy} onclick={cancel}
+        >Cancel sync</button
+      >{/if}
     >{:else}<span title="Only Guild Masters can trigger a full sync"
       >Trigger restricted to Guild Master</span
     >{/if}
   <p>Scheduled runs keep the ledger fresh nightly at 03:00 UTC.</p>
 </section>
 {#if error}<p class="error" role="status">{error}</p>{/if}
+{#if canViewProgress && progress && progressActive(progress)}
+  <section aria-live="polite">
+    <h2>Expedition in progress</h2>
+    <p class="count">
+      <span class="chip">{progress.status}</span>
+      <span class="chip">{phaseLabel(progress.phase)}</span>
+      {progress.updated} updated · {progress.failed} failed · {progress.total} apes
+    </p>
+  </section>
+{/if}
 {#if role === "member"}<section>
     <h2>Sync run history</h2>
     <p class="restricted">
@@ -64,7 +163,7 @@
           ><tr>
             <th>Started</th><th>Trigger</th><th>Status</th><th>Updated</th><th>Failed</th><th
               >Total</th
-            >
+            >{#if canTrigger}<th>Actions</th>{/if}
           </tr></thead
         ><tbody
           >{#each runs as run}{@const notify = notifyStatusChip(run.notifyStatus)}<tr
@@ -74,9 +173,13 @@
                   >{/if}{#if run.failed > 0 && run.errorSummary}<small class="error-line"
                     >{run.errorSummary}</small
                   >{/if}</td
-              ><td>{run.updated}</td><td>{run.failed}</td><td>{run.total}</td></tr
+              ><td>{run.updated}</td><td>{run.failed}</td><td>{run.total}</td>{#if canTrigger}<td
+                  >{#if run.failed > 0}<button disabled={busy} onclick={() => retry(run)}
+                      >Retry failed</button
+                    >{/if}</td
+                >{/if}</tr
             >{#if run.failed > 0}<tr class="detail-row"
-                ><td colspan="6">
+                ><td colspan={canTrigger ? 7 : 6}>
                   <details class="run-failures">
                     <summary>Failure detail · {run.failed} apes</summary>
                     <ul class="failure-detail">

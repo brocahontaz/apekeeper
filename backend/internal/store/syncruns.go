@@ -3,9 +3,10 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"time"
+
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"time"
 )
 
 type SyncRun struct {
@@ -20,56 +21,30 @@ type SyncRun struct {
 	Failed       int              `json:"failed"`
 	ErrorSummary string           `json:"errorSummary"`
 	Detail       json.RawMessage  `json:"detail"`
-	// NotifyStatus is the outcome of the post-run Discord fan-out; nil when
-	// the run predates notification tracking.
-	NotifyStatus *string `json:"notifyStatus"`
+	NotifyStatus *string          `json:"notifyStatus"`
 }
 type SyncRunStore struct{ pool *pgxpool.Pool }
 
 func (s SyncRunStore) Create(ctx context.Context, guildID int64, trigger string) (SyncRun, error) {
 	r := SyncRun{GuildID: guildID, Trigger: trigger, Status: domain.RunRunning}
-	e := s.pool.QueryRow(ctx, `INSERT INTO sync_runs(guild_id,trigger,status)
-		VALUES($1,$2,'running')
-		RETURNING id,started_at`, guildID, trigger).
-		Scan(&r.ID, &r.StartedAt)
+	e := s.pool.QueryRow(ctx, `INSERT INTO sync_runs(guild_id,trigger,status) VALUES($1,$2,'running') RETURNING id,started_at`, guildID, trigger).Scan(&r.ID, &r.StartedAt)
 	return r, e
 }
-
 func (s SyncRunStore) Finish(ctx context.Context, r SyncRun) error {
-	_, e := s.pool.Exec(ctx, `UPDATE sync_runs SET
-		finished_at=now(),
-		status=$2,
-		characters_total=$3,
-		characters_updated=$4,
-		characters_failed=$5,
-		error_summary=$6,
-		detail=$7
-		WHERE id=$1`,
-		r.ID, r.Status, r.Total, r.Updated, r.Failed, r.ErrorSummary, r.Detail)
+	_, e := s.pool.Exec(ctx, `UPDATE sync_runs SET finished_at=now(),status=$2,characters_total=$3,characters_updated=$4,characters_failed=$5,error_summary=$6,detail=$7 WHERE id=$1`, r.ID, r.Status, r.Total, r.Updated, r.Failed, r.ErrorSummary, r.Detail)
 	return e
 }
-
-// SetNotifyStatus records the outcome of the post-run Discord fan-out. It is
-// best-effort bookkeeping: callers must treat a failure as a warning and
-// never let it change the run's stored status or result.
 func (s SyncRunStore) SetNotifyStatus(ctx context.Context, runID int64, status string) error {
 	_, e := s.pool.Exec(ctx, `UPDATE sync_runs SET notify_status=$2 WHERE id=$1`, runID, status)
 	return e
 }
-
+func (s SyncRunStore) ByID(ctx context.Context, guildID, id int64) (SyncRun, error) {
+	var r SyncRun
+	e := s.pool.QueryRow(ctx, `SELECT id,guild_id,started_at,finished_at,trigger,status,COALESCE(characters_total,0),COALESCE(characters_updated,0),COALESCE(characters_failed,0),COALESCE(error_summary,''),COALESCE(detail,'{}'),notify_status FROM sync_runs WHERE guild_id=$1 AND id=$2`, guildID, id).Scan(&r.ID, &r.GuildID, &r.StartedAt, &r.FinishedAt, &r.Trigger, &r.Status, &r.Total, &r.Updated, &r.Failed, &r.ErrorSummary, &r.Detail, &r.NotifyStatus)
+	return r, e
+}
 func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]SyncRun, error) {
-	rows, e := s.pool.Query(ctx, `SELECT
-		id,guild_id,started_at,finished_at,trigger,status,
-		COALESCE(characters_total,0),
-		COALESCE(characters_updated,0),
-		COALESCE(characters_failed,0),
-		COALESCE(error_summary,''),
-		COALESCE(detail,'{}'),
-		notify_status
-		FROM sync_runs
-		WHERE guild_id=$1
-		ORDER BY started_at DESC
-		LIMIT $2`, guildID, limit)
+	rows, e := s.pool.Query(ctx, `SELECT id,guild_id,started_at,finished_at,trigger,status,COALESCE(characters_total,0),COALESCE(characters_updated,0),COALESCE(characters_failed,0),COALESCE(error_summary,''),COALESCE(detail,'{}'),notify_status FROM sync_runs WHERE guild_id=$1 ORDER BY started_at DESC LIMIT $2`, guildID, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -77,12 +52,7 @@ func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]
 	var out []SyncRun
 	for rows.Next() {
 		var r SyncRun
-		e = rows.Scan(
-			&r.ID, &r.GuildID, &r.StartedAt, &r.FinishedAt, &r.Trigger, &r.Status,
-			&r.Total, &r.Updated, &r.Failed, &r.ErrorSummary, &r.Detail,
-			&r.NotifyStatus,
-		)
-		if e != nil {
+		if e = rows.Scan(&r.ID, &r.GuildID, &r.StartedAt, &r.FinishedAt, &r.Trigger, &r.Status, &r.Total, &r.Updated, &r.Failed, &r.ErrorSummary, &r.Detail, &r.NotifyStatus); e != nil {
 			return nil, e
 		}
 		out = append(out, r)

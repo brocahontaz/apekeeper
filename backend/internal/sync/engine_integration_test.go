@@ -72,6 +72,7 @@ type fakeClient struct {
 	mythicErr, raidsErr   error
 	mediaErr              error
 	profileWait           <-chan struct{}
+	rosterWait            <-chan struct{}
 	seasons               []string
 	profileCalls          int
 	profileIndex          dto.MythicPlusProfileIndex
@@ -83,7 +84,14 @@ type fakeClient struct {
 	raidsResponse         dto.Raids
 }
 
-func (f *fakeClient) GuildRoster(context.Context, string, string) (dto.GuildRoster, error) {
+func (f *fakeClient) GuildRoster(ctx context.Context, _ string, _ string) (dto.GuildRoster, error) {
+	if f.rosterWait != nil {
+		select {
+		case <-f.rosterWait:
+		case <-ctx.Done():
+			return dto.GuildRoster{}, ctx.Err()
+		}
+	}
 	if f.rosterErr != nil {
 		return dto.GuildRoster{}, f.rosterErr
 	}
@@ -97,9 +105,13 @@ func (f *fakeClient) GuildRoster(context.Context, string, string) (dto.GuildRost
 	}
 	return r, nil
 }
-func (f *fakeClient) CharacterProfileSummary(_ context.Context, _, n string) (dto.ProfileSummary, error) {
+func (f *fakeClient) CharacterProfileSummary(ctx context.Context, _, n string) (dto.ProfileSummary, error) {
 	if f.profileWait != nil {
-		<-f.profileWait
+		select {
+		case <-f.profileWait:
+		case <-ctx.Done():
+			return dto.ProfileSummary{}, ctx.Err()
+		}
 	}
 	if f.profileErr != nil && n == "Two" {
 		return dto.ProfileSummary{}, f.profileErr
@@ -282,6 +294,67 @@ func TestEnginePersistsSyncAndChangedSnapshots(t *testing.T) {
 	d, err = s.Characters.Detail(context.Background(), g.ID, chars[0].ID, time.Time{})
 	if err != nil || len(d.Snapshots) != 2 {
 		t.Fatalf("changed snapshots=%d err=%v", len(d.Snapshots), err)
+	}
+}
+
+func TestEngineDryRunFetchesWithoutWritingGuildData(t *testing.T) {
+	e, s, g := testEngine(t, &fakeClient{rating: 100, ilvl: 600})
+	if run, err := e.RunGuildSync(context.Background(), g, "manual"); err != nil || run.Status != domain.RunSuccess {
+		t.Fatalf("seed run=%+v err=%v", run, err)
+	}
+	before, err := s.Characters.ListByGuild(context.Background(), g.ID, store.CharacterFilter{})
+	if err != nil || len(before) != 2 {
+		t.Fatalf("seed characters=%+v err=%v", before, err)
+	}
+	beforeDetails := make([]store.CharacterDetail, len(before))
+	for i, c := range before {
+		beforeDetails[i], err = s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.Client = &fakeClient{rating: 999, ilvl: 700}
+	run, err := e.Stores.SyncRuns.Create(context.Background(), g.ID, "dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = e.RunGuildSyncWithOptions(context.Background(), g, run, RunOptions{DryRun: true})
+	if err != nil || run.Status != domain.RunSuccess || run.Updated != 2 {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	chars, err := s.Characters.ListByGuild(context.Background(), g.ID, store.CharacterFilter{})
+	if err != nil || !reflect.DeepEqual(chars, before) {
+		t.Fatalf("dry run changed characters=%+v, want %+v (err=%v)", chars, before, err)
+	}
+	for i, c := range chars {
+		detail, err := s.Characters.Detail(context.Background(), g.ID, c.ID, time.Time{})
+		if err != nil || !reflect.DeepEqual(detail, beforeDetails[i]) {
+			t.Fatalf("dry run changed progression or snapshots: detail=%+v want=%+v err=%v", detail, beforeDetails[i], err)
+		}
+	}
+	history, err := s.SyncRuns.History(context.Background(), g.ID, 1)
+	if err != nil || len(history) != 1 || history[0].Trigger != "dry-run" || history[0].Status != domain.RunSuccess {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+func TestEngineCancelledRunSettlesWithoutDispatchingWorkers(t *testing.T) {
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600})
+	run, err := s.SyncRuns.Create(context.Background(), g.ID, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan store.SyncRun, 1)
+	go func() { got, _ := e.RunGuildSyncWithRun(ctx, g, run); done <- got }()
+	select {
+	case got := <-done:
+		if got.Status != domain.RunFailed || got.ErrorSummary != "sync cancelled" {
+			t.Fatalf("run=%+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled sync did not settle")
 	}
 }
 
@@ -777,6 +850,70 @@ func TestEngineRecordsFailures(t *testing.T) {
 	r, err = e.RunGuildSync(context.Background(), g, "manual")
 	if err == nil || r.Status != domain.RunFailed || r.ErrorSummary == "" {
 		t.Fatalf("run=%+v err=%v", r, err)
+	}
+}
+
+// progressEvent is one optional-hook observation: the phase plus the counts
+// the run had settled at when it fired.
+type progressEvent struct {
+	phase                  domain.Phase
+	updated, failed, total int
+}
+
+// progressCapture records hook calls from every worker goroutine under a
+// lock, so the reported order and counts stay comparable after the run.
+type progressCapture struct {
+	mu     sync.Mutex
+	events []progressEvent
+}
+
+func (c *progressCapture) add(phase domain.Phase, updated, failed, total int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, progressEvent{phase, updated, failed, total})
+}
+
+func (c *progressCapture) got() []progressEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]progressEvent(nil), c.events...)
+}
+
+// The optional progress hook observes the run's phases in order with the
+// roster total and per-character counts; leaving it nil keeps the engine
+// unchanged, which every other test in this package exercises.
+func TestEngineReportsProgressPhases(t *testing.T) {
+	e, _, g := testEngine(t, &fakeClient{ilvl: 600})
+	capture := &progressCapture{}
+	e.Progress = capture.add
+	r, err := e.RunGuildSync(context.Background(), g, "manual")
+	if err != nil || r.Status != domain.RunSuccess || r.Updated != 2 {
+		t.Fatalf("run=%+v err=%v", r, err)
+	}
+	events := capture.got()
+	phases := make([]domain.Phase, 0, len(events))
+	for _, ev := range events {
+		phases = append(phases, ev.phase)
+	}
+	// One worker, two characters: the anchor resolves once and each character
+	// completion reports under the run's counter lock.
+	want := []domain.Phase{
+		domain.PhaseRoster,
+		domain.PhaseTierAnchor,
+		domain.PhaseCharacters,
+		domain.PhaseCharacters,
+		domain.PhaseCharacters,
+		domain.PhaseFinalizing,
+	}
+	if !reflect.DeepEqual(phases, want) {
+		t.Fatalf("phases=%v, want %v", phases, want)
+	}
+	if events[0].total != 2 || events[0].updated != 0 || events[0].failed != 0 {
+		t.Fatalf("roster event=%+v, want the full total with no counts", events[0])
+	}
+	last := events[len(events)-1]
+	if last.updated != 2 || last.failed != 0 || last.total != 2 {
+		t.Fatalf("finalizing event=%+v, want the settled outcome", last)
 	}
 }
 

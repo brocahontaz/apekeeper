@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   canTriggerSync,
+  canViewProgress,
   canViewRuns,
   failureDetails,
   notifyStatusChip,
+  phaseLabel,
+  progressActive,
+  progressTerminal,
   type AppRole,
 } from "$lib/sync";
 
@@ -62,5 +66,46 @@ describe("sync role gating", () => {
   it("allows viewing runs for officer and above", () => {
     for (const [role, , view] of cases) expect(canViewRuns(role)).toBe(view);
     expect(canViewRuns(undefined)).toBe(false);
+  });
+  it("allows viewing live progress for the same set as run history", () => {
+    for (const [role, , view] of cases) expect(canViewProgress(role)).toBe(view);
+    expect(canViewProgress(undefined)).toBe(false);
+  });
+});
+
+describe("phaseLabel", () => {
+  it("maps live phases onto expedition-log wording", () => {
+    expect(phaseLabel("queued")).toBe("Queued");
+    expect(phaseLabel("roster")).toBe("Reading the roster");
+    expect(phaseLabel("tier-anchor")).toBe("Anchoring the tier");
+    expect(phaseLabel("characters")).toBe("Updating the crew");
+    expect(phaseLabel("finalizing")).toBe("Writing the ledger");
+  });
+
+  it("falls back to the queued wording for unknown or missing phases", () => {
+    expect(phaseLabel("")).toBe("Queued");
+    expect(phaseLabel("mystery")).toBe("Queued");
+    expect(phaseLabel(undefined)).toBe("Queued");
+  });
+});
+
+describe("progressActive", () => {
+  it("stays true while a run is in flight", () => {
+    expect(progressActive({ active: true, status: "running" })).toBe(true);
+  });
+
+  it("ends on an idle snapshot or a terminal status", () => {
+    expect(progressActive({ active: false, status: "success" })).toBe(false);
+    expect(progressActive({ active: true, status: "success" })).toBe(false);
+    expect(progressActive({ active: true, status: "partial" })).toBe(false);
+    expect(progressActive({ active: true, status: "failed" })).toBe(false);
+  });
+
+  it("treats only settled run statuses as terminal", () => {
+    expect(progressTerminal("running")).toBe(false);
+    expect(progressTerminal("")).toBe(false);
+    expect(progressTerminal("success")).toBe(true);
+    expect(progressTerminal("partial")).toBe(true);
+    expect(progressTerminal("failed")).toBe(true);
   });
 });

@@ -29,13 +29,29 @@ func (f TriggerFunc) Trigger(c context.Context) (int64, error) {
 	return f(c)
 }
 
+// ProgressReporter optionally supplies the live sync progress snapshot.
+// Keeping it separate from Trigger lets existing trigger implementations and
+// tests compile unchanged; the sync service provides the real source.
+type ProgressReporter interface {
+	Progress() domain.Progress
+}
+type SyncOperations interface {
+	StartDryRun(context.Context) (store.SyncRun, error)
+	StartRetry(context.Context, int64) (store.SyncRun, error)
+	Cancel() error
+}
+
 type API struct {
 	Stores    store.Store
 	Auth      *auth.Manager
 	GuildSlug string
 	Trigger   Trigger
-	Ping      db.Pinger
-	Now       func() time.Time
+	// Progress optionally backs GET /api/sync/progress; when nil the
+	// endpoint answers with an idle, zero-valued snapshot.
+	Progress   ProgressReporter
+	Operations SyncOperations
+	Ping       db.Pinger
+	Now        func() time.Time
 	// Frontend optionally supplies a built SPA filesystem. When nil, the
 	// conventional ./frontend/dist directory is used if it exists.
 	Frontend  fs.FS
@@ -63,8 +79,13 @@ func New(a API) http.Handler {
 	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
 	m.Handle("GET /api/sync/runs",
 		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
+	m.Handle("GET /api/sync/progress",
+		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncProgress)))
 	m.Handle("POST /api/sync/run",
 		a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.triggerSync)))
+	m.Handle("POST /api/sync/dry-run", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.dryRun)))
+	m.Handle("POST /api/sync/runs/{id}/retry", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.retrySync)))
+	m.Handle("POST /api/sync/cancel", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.cancelSync)))
 	return spa(m, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
@@ -435,6 +456,17 @@ func (a API) syncRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, rows)
 }
+
+// syncProgress serves exactly the service's live snapshot — never a stored
+// history row — so the UI can poll the run that is actually in flight. The
+// zero snapshot renders as an idle payload with the same shape.
+func (a API) syncProgress(w http.ResponseWriter, r *http.Request) {
+	var snap domain.Progress
+	if a.Progress != nil {
+		snap = a.Progress.Progress()
+	}
+	jsonOut(w, 200, snap)
+}
 func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 	if a.Trigger == nil {
 		fail(w, 503, "sync unavailable")
@@ -450,4 +482,49 @@ func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 202, map[string]any{"runId": id})
+}
+func (a API) dryRun(w http.ResponseWriter, r *http.Request) {
+	if a.Operations == nil {
+		fail(w, 503, "sync unavailable")
+		return
+	}
+	run, e := a.Operations.StartDryRun(r.Context())
+	a.operationResult(w, run, e)
+}
+func (a API) retrySync(w http.ResponseWriter, r *http.Request) {
+	if a.Operations == nil {
+		fail(w, 503, "sync unavailable")
+		return
+	}
+	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if e != nil || id <= 0 {
+		fail(w, 400, "invalid sync run id")
+		return
+	}
+	run, e := a.Operations.StartRetry(r.Context(), id)
+	a.operationResult(w, run, e)
+}
+func (a API) cancelSync(w http.ResponseWriter, r *http.Request) {
+	if a.Operations == nil {
+		fail(w, 503, "sync unavailable")
+		return
+	}
+	if e := a.Operations.Cancel(); e != nil {
+		fail(w, 409, "no sync is running")
+		return
+	}
+	jsonOut(w, 202, map[string]bool{"cancelled": true})
+}
+func (a API) operationResult(w http.ResponseWriter, run store.SyncRun, e error) {
+	if e != nil {
+		if strings.Contains(e.Error(), "already running") {
+			fail(w, 409, "sync already running")
+		} else if strings.Contains(e.Error(), "retry unavailable") {
+			fail(w, 409, "retry unavailable")
+		} else {
+			fail(w, 500, "could not trigger sync")
+		}
+		return
+	}
+	jsonOut(w, 202, map[string]any{"runId": run.ID})
 }

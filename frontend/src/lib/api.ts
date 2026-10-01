@@ -55,6 +55,17 @@ export type SyncRun = {
   errorSummary: string;
   detail: unknown;
 };
+export type SyncProgress = {
+  active: boolean;
+  runId: number;
+  status: string;
+  phase: string;
+  total: number;
+  updated: number;
+  failed: number;
+  startedAt: string;
+  dryRun: boolean;
+};
 export type Dashboard = {
   rosterSize: number;
   maxLevelMembers: number;
@@ -111,6 +122,10 @@ export const client = {
   roster: (q = "") => api<RosterPage>(`/api/roster${q}`),
   character: (name: string) => api<Character>(`/api/characters/${encodeURIComponent(name)}`),
   runs: () => api<SyncRun[]>("/api/sync/runs"),
+  progress: () => api<SyncProgress>("/api/sync/progress"),
   sync: () => api<{ runId: number }>("/api/sync/run", { method: "POST" }),
+  dryRun: () => api<{ runId: number }>("/api/sync/dry-run", { method: "POST" }),
+  retry: (id: number) => api<{ runId: number }>(`/api/sync/runs/${id}/retry`, { method: "POST" }),
+  cancel: () => api<{ cancelled: boolean }>("/api/sync/cancel", { method: "POST" }),
   logout: () => api<void>("/api/auth/logout", { method: "POST" }),
 };

@@ -24,6 +24,17 @@ type Engine struct {
 	Log     *slog.Logger
 	Now     func() time.Time
 	Workers int
+	// Progress is an optional live-reporting hook; when nil the engine works
+	// unchanged. It fires under the run's counter lock, so implementations
+	// must not block and must be safe for concurrent use.
+	Progress func(phase domain.Phase, updated, failed, total int)
+}
+
+// RunOptions keeps operational modes explicit. DryRun fetches the same
+// upstream data but suppresses every character, progression and snapshot write.
+type RunOptions struct {
+	DryRun bool
+	Names  map[string]bool
 }
 
 // TierAnchor pins a guild sync to the season and expansion that are current
@@ -95,24 +106,59 @@ func (e Engine) RunGuildSync(ctx context.Context, g domain.Guild, trigger string
 	return e.RunGuildSyncWithRun(ctx, g, run)
 }
 
+// report forwards live run progress to the optional hook; the engine works
+// unchanged when Progress is nil.
+func (e Engine) report(phase domain.Phase, updated, failed, total int) {
+	if e.Progress != nil {
+		e.Progress(phase, updated, failed, total)
+	}
+}
+
 // RunGuildSyncWithRun completes a sync run which has already been created.
 func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run store.SyncRun) (store.SyncRun, error) {
+	return e.RunGuildSyncWithOptions(ctx, g, run, RunOptions{})
+}
+
+func (e Engine) RunGuildSyncWithOptions(ctx context.Context, g domain.Guild, run store.SyncRun, opt RunOptions) (store.SyncRun, error) {
 	roster, err := e.Client.GuildRoster(ctx, g.Realm, g.Name)
 	if err != nil {
 		run.Status = domain.RunFailed
-		run.ErrorSummary = err.Error()
+		if ctx.Err() != nil {
+			run.ErrorSummary = "sync cancelled"
+		} else {
+			run.ErrorSummary = err.Error()
+		}
 		if e.Log != nil {
 			e.Log.Error("guild roster sync failed", "guild", g.Slug, "name", g.Name, "error", err)
 		}
-		e.finish(ctx, run)
+		e.report(domain.PhaseFinalizing, 0, 0, 0)
+		if ctx.Err() != nil {
+			finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			e.finish(finishCtx, run)
+			cancel()
+		} else {
+			e.finish(ctx, run)
+		}
 		return run, err
 	}
+	if len(opt.Names) > 0 {
+		members := roster.Members[:0]
+		for _, m := range roster.Members {
+			if opt.Names[strings.ToLower(m.Character.Name)] {
+				members = append(members, m)
+			}
+		}
+		roster.Members = members
+	}
 	run.Total = len(roster.Members)
+	e.report(domain.PhaseRoster, 0, 0, run.Total)
 	now := time.Now()
 	if e.Now != nil {
 		now = e.Now()
 	}
+	e.report(domain.PhaseTierAnchor, 0, 0, run.Total)
 	anchor := e.resolveTierAnchor(ctx)
+	e.report(domain.PhaseCharacters, 0, 0, run.Total)
 	workers := e.Workers
 	if workers <= 0 {
 		workers = 8
@@ -123,7 +169,7 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 	var wg sync.WaitGroup
 	work := func(m dto.RosterMember) {
 		defer wg.Done()
-		c, er := e.syncCharacter(ctx, g, m, anchor, now)
+		c, er := e.syncCharacter(ctx, g, m, anchor, now, opt.DryRun)
 		mu.Lock()
 		defer mu.Unlock()
 		if er != nil {
@@ -136,6 +182,9 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 			_ = c
 			run.Updated++
 		}
+		// Reported inside the counter critical section so the hook always
+		// observes a consistent set of counts.
+		e.report(domain.PhaseCharacters, run.Updated, run.Failed, run.Total)
 	}
 	for i := 0; i < workers; i++ {
 		go func() {
@@ -145,17 +194,41 @@ func (e Engine) RunGuildSyncWithRun(ctx context.Context, g domain.Guild, run sto
 		}()
 	}
 	wg.Add(len(roster.Members))
+	sent := 0
+dispatch:
 	for _, m := range roster.Members {
-		jobs <- m
+		select {
+		case jobs <- m:
+			sent++
+		case <-ctx.Done():
+			break dispatch
+		}
+	}
+	// Jobs that were never handed to a worker still own a WaitGroup count.
+	// Release them here before closing the queue so cancellation cannot deadlock.
+	for i := sent; i < len(roster.Members); i++ {
+		wg.Done()
 	}
 	close(jobs)
 	wg.Wait()
-	run.Status = domain.Outcome(run.Updated, run.Failed)
-	if run.Failed > 0 {
+	if ctx.Err() != nil {
+		run.Status = domain.RunFailed
+		run.ErrorSummary = "sync cancelled"
+	} else {
+		run.Status = domain.Outcome(run.Updated, run.Failed)
+	}
+	if run.Failed > 0 && ctx.Err() == nil {
 		run.ErrorSummary = fmt.Sprintf("%d of %d characters failed", run.Failed, run.Total)
 		run.Detail, _ = json.Marshal(details)
 	}
-	err = e.finish(ctx, run)
+	e.report(domain.PhaseFinalizing, run.Updated, run.Failed, run.Total)
+	if ctx.Err() != nil {
+		finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = e.finish(finishCtx, run)
+	} else {
+		err = e.finish(ctx, run)
+	}
 	return run, err
 }
 
@@ -173,6 +246,7 @@ func (e Engine) syncCharacter(
 	m dto.RosterMember,
 	anchor TierAnchor,
 	now time.Time,
+	dryRun bool,
 ) (domain.Character, error) {
 	p, err := e.Client.CharacterProfileSummary(ctx, m.Character.Realm.Slug, m.Character.Name)
 	if err != nil {
@@ -196,9 +270,11 @@ func (e Engine) syncCharacter(
 		SyncedAt:       now,
 	}
 	raw, _ := json.Marshal(p)
-	c, err = e.Stores.Characters.UpsertByGuildIdentity(ctx, c, raw)
-	if err != nil {
-		return c, err
+	if !dryRun {
+		c, err = e.Stores.Characters.UpsertByGuildIdentity(ctx, c, raw)
+		if err != nil {
+			return c, err
+		}
 	}
 	// The avatar is auxiliary: failures never fail the character and never
 	// clear a portrait that was stored by an earlier sync.
@@ -207,7 +283,7 @@ func (e Engine) syncCharacter(
 		if e.Log != nil {
 			e.Log.Debug("character media unavailable", "character", c.Name, "error", err)
 		}
-	} else {
+	} else if !dryRun {
 		for _, a := range media.Assets {
 			if a.Key == "avatar" && a.Value != "" {
 				if err = e.Stores.Characters.UpdateAvatar(ctx, c.ID, a.Value); err != nil {
@@ -311,9 +387,13 @@ func (e Engine) syncCharacter(
 			}
 			var err error
 			if seasonFound {
-				err = e.Stores.Progression.UpsertMythicPlus(ctx, upsert)
+				if !dryRun {
+					err = e.Stores.Progression.UpsertMythicPlus(ctx, upsert)
+				}
 			} else {
-				err = e.Stores.Progression.UpsertMythicPlusRuns(ctx, upsert)
+				if !dryRun {
+					err = e.Stores.Progression.UpsertMythicPlusRuns(ctx, upsert)
+				}
 			}
 			if err != nil {
 				progressionErr = err
@@ -352,21 +432,26 @@ func (e Engine) syncCharacter(
 				}
 			}
 		}
-		if err = e.Stores.Progression.ReplaceRaids(ctx, c.ID, rows); err != nil && progressionErr == nil {
+		if !dryRun {
+			err = e.Stores.Progression.ReplaceRaids(ctx, c.ID, rows)
+		}
+		if err != nil && progressionErr == nil {
 			progressionErr = err
 		}
 	}
 	// Once the character is upserted, progression failures remain per-character
 	// failures but do not discard the profile data that a snapshot can preserve.
-	if err = e.capture(ctx, c, domain.Snapshot{
-		CharacterID:  c.ID,
-		CapturedAt:   now,
-		ItemLevel:    c.ItemLevel,
-		MythicRating: mp.MythicRating.Rating,
-		BestKeyLevel: best,
-		RaidProgress: raidJSON,
-	}); err != nil {
-		return c, err
+	if !dryRun {
+		if err = e.capture(ctx, c, domain.Snapshot{
+			CharacterID:  c.ID,
+			CapturedAt:   now,
+			ItemLevel:    c.ItemLevel,
+			MythicRating: mp.MythicRating.Rating,
+			BestKeyLevel: best,
+			RaidProgress: raidJSON,
+		}); err != nil {
+			return c, err
+		}
 	}
 	return c, progressionErr
 }
