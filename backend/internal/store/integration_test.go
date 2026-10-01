@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -602,6 +603,48 @@ func TestDeleteSnapshotsBeforeRemovesOnlyOldSnapshots(t *testing.T) {
 	}
 	if len(d.Snapshots) != 1 || !d.Snapshots[0].CapturedAt.Equal(recent) {
 		t.Fatalf("snapshots=%+v, want only the recent snapshot", d.Snapshots)
+	}
+}
+
+func TestTrendsByGuildUsesLatestDailySnapshotsAndAggregatesRaids(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "trends", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upsert := func(name string, syncedAt time.Time) domain.Character {
+		t.Helper()
+		c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{GuildID: g.ID, Name: name, DisplayName: name, NormalizedName: name, Realm: "Area 52", RealmSlug: "area-52", Region: "us", SyncedAt: syncedAt}, []byte("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	active, inactive := upsert("Active", now), upsert("Inactive", now.AddDate(0, 0, -10))
+	raid := func(progress int) []byte {
+		return []byte(`{"expansions":[{"instances":[{"instance":{"name":"Vault"},"modes":[{"difficulty":{"name":"Heroic"},"progress":{"completed_count":` + strconv.Itoa(progress) + `,"total_count":8}}]}]}]}`)
+	}
+	for _, snap := range []domain.Snapshot{
+		{CharacterID: active.ID, CapturedAt: now.Add(-3 * time.Hour), ItemLevel: 600, MythicRating: 2000, RaidProgress: raid(3)},
+		{CharacterID: active.ID, CapturedAt: now.Add(-time.Hour), ItemLevel: 620, MythicRating: 2200, RaidProgress: raid(4)},
+		{CharacterID: inactive.ID, CapturedAt: now.Add(-2 * time.Hour), ItemLevel: 580, MythicRating: 1800, RaidProgress: []byte(`{"expansions":[{"instances":[{"instance":{"name":"Vault"},"modes":[]}]}]}`)},
+	} {
+		if err := s.Progression.InsertSnapshot(ctx, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trends, err := s.Characters.TrendsByGuild(ctx, g.ID, now.AddDate(0, 0, -1), now, now.Add(-7*24*time.Hour), 31)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trends) != 1 || trends[0].AverageItemLevel != 600 || trends[0].AverageRating != 2000 || trends[0].StaleCount != 1 {
+		t.Fatalf("trends=%+v, want latest snapshots for both active and inactive characters", trends)
+	}
+	if len(trends[0].RaidProgress) != 1 || trends[0].RaidProgress[0] != (store.GuildTrendRaid{RaidName: "Vault", Difficulty: "Heroic", Progress: 4, TotalBosses: 8}) {
+		t.Fatalf("raid progress=%+v, want aggregated Vault Heroic 4/8", trends[0].RaidProgress)
 	}
 }
 

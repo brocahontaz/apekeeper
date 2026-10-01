@@ -70,6 +70,10 @@ The roster page exports the roster as a CSV download (Export CSV link) matching 
 
 A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETENTION_DAYS` (default 90) and expired sessions.
 
+## Historical progression
+
+`GET /api/characters/{id}/history` returns guild-scoped, oldest-first snapshots for a validated RFC3339 `from`/`to` range (at most 90 days) and a bounded `limit` (at most 500). It includes item level, Mythic+ rating, best key, raid payload, timestamps, and an optional comparison selected by `compareFrom` and `compareTo` snapshot IDs. The response reports the configured retention period so the UI can explain missing older records. `GET /api/dashboard` includes daily guild trend aggregates; these are computed with one set-based grouped snapshot query, never one history request per character. The existing `progression_snapshots(character_id,captured_at)` index already supports guild character joins and ordered history reads, so no duplicate index or migration is justified.
+
 ## Tests
 
 ```sh

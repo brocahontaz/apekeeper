@@ -103,7 +103,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", "Arcane", now)
+	otherAlpha := seedCharacter(t, ctx, stores, otherGuild.ID, "Alpha", "Warrior", "Arcane", now)
 	// Give Alpha a profile summary carrying the localized race/gender maps the
 	// sync engine stores; the detail handler must surface them.
 	alpha, err = stores.Characters.UpsertByGuildIdentity(ctx, alpha, []byte(
@@ -139,6 +139,16 @@ func TestStoreBackedHandlers(t *testing.T) {
 		Summary:     []byte("{}"),
 		SyncedAt:    now,
 	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{
+		CharacterID:  alpha.ID,
+		CapturedAt:   now.Add(-24 * time.Hour),
+		ItemLevel:    610,
+		MythicRating: 2400,
+		BestKeyLevel: 10,
+		RaidProgress: []byte(`{"expansions":[{"instances":[{"instance":{"name":"Raid"},"modes":[{"difficulty":{"name":"Heroic"},"progress":{"completed_count":4,"total_count":8}}]}]}]}`),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{
@@ -230,6 +240,10 @@ func TestStoreBackedHandlers(t *testing.T) {
 		}
 		if _, ok := body["specDistribution"]; ok {
 			t.Fatalf("dashboard must not expose specDistribution: %v", body)
+		}
+		trends := body["trends"].([]any)
+		if len(trends) != 2 || trends[0].(map[string]any)["averageItemLevel"] != float64(610) || trends[1].(map[string]any)["averageRating"] != float64(2500) || trends[0].(map[string]any)["staleCount"] != float64(0) {
+			t.Fatalf("trends=%v", trends)
 		}
 		dist := body["classDistribution"].([]any)
 		wantClasses := []string{"Mage", "Rogue", "Warrior"}
@@ -350,17 +364,84 @@ func TestStoreBackedHandlers(t *testing.T) {
 			t.Fatalf("raidProgression=%v", raid)
 		}
 		snap := body["snapshots"].([]any)[0].(map[string]any)
-		if snap["itemLevel"] != float64(620) {
+		if snap["itemLevel"] != float64(610) {
 			t.Fatalf("snapshots=%v", snap)
 		}
 		if _, ok := snap["capturedAt"].(string); !ok {
 			t.Fatalf("snapshots capturedAt=%v, want a string", snap["capturedAt"])
+		}
+		if _, ok := snap["raidProgress"].(map[string]any); !ok {
+			t.Fatalf("snapshots raidProgress=%T, want JSON object rather than base64", snap["raidProgress"])
 		}
 		byName := request(h, http.MethodGet, "/api/characters/Alpha", member)
 		if byName.Code != http.StatusOK || decodeBody(t, byName).(map[string]any)["id"] != float64(alpha.ID) {
 			t.Fatalf("named character=%d %s", byName.Code, byName.Body.String())
 		}
 		assertStatus(t, h, http.MethodGet, "/api/characters/999999", member, http.StatusNotFound)
+	})
+	t.Run("character history is bounded, ordered, and guild scoped", func(t *testing.T) {
+		assertStatus(t, h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history", "", http.StatusUnauthorized)
+		base := "/api/characters/" + intString(alpha.ID) + "/history?from=2026-01-14T12:00:00Z&to=2026-01-15T12:00:00Z&limit=2"
+		r := request(h, http.MethodGet, base, member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		body := decodeBody(t, r).(map[string]any)
+		snaps := body["snapshots"].([]any)
+		if len(snaps) != 2 || snaps[0].(map[string]any)["itemLevel"] != float64(610) || snaps[1].(map[string]any)["itemLevel"] != float64(620) {
+			t.Fatalf("history=%v", body)
+		}
+		// Date endpoints are inclusive; moving either endpoint one second inside
+		// the range excludes the snapshot that was exactly on that boundary.
+		atStart := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-14T12:00:00Z&to=2026-01-14T12:00:00Z", member)
+		if atStart.Code != http.StatusOK || len(decodeBody(t, atStart).(map[string]any)["snapshots"].([]any)) != 1 {
+			t.Fatalf("start boundary=%d %s", atStart.Code, atStart.Body.String())
+		}
+		atEnd := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-15T12:00:00Z&to=2026-01-15T12:00:00Z", member)
+		if atEnd.Code != http.StatusOK || len(decodeBody(t, atEnd).(map[string]any)["snapshots"].([]any)) != 1 {
+			t.Fatalf("end boundary=%d %s", atEnd.Code, atEnd.Body.String())
+		}
+		inside := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-14T12:00:01Z&to=2026-01-15T11:59:59Z", member)
+		if inside.Code != http.StatusOK || len(decodeBody(t, inside).(map[string]any)["snapshots"].([]any)) != 0 {
+			t.Fatalf("exclusive boundaries=%d %s", inside.Code, inside.Body.String())
+		}
+		comparison := body["comparison"].(map[string]any)
+		if comparison["itemLevelDelta"] != float64(10) || comparison["mythicRatingDelta"] != float64(100) {
+			t.Fatalf("comparison=%v", comparison)
+		}
+		first, second := snaps[0].(map[string]any)["id"], snaps[1].(map[string]any)["id"]
+		r = request(h, http.MethodGet, base+"&compareFrom="+strconv.Itoa(int(first.(float64)))+"&compareTo="+strconv.Itoa(int(second.(float64))), member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("selected comparison=%d %s", r.Code, r.Body.String())
+		}
+		// A selected ID must be checked even if this range only has one result,
+		// and IDs outside the range must not be mistaken for no comparison.
+		assertStatus(t, h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-15T12:00:00Z&to=2026-01-15T12:00:00Z&compareFrom="+strconv.Itoa(int(first.(float64)))+"&compareTo="+strconv.Itoa(int(second.(float64))), member, http.StatusBadRequest)
+		assertStatus(t, h, http.MethodGet, base+"&compareFrom=999999&compareTo="+strconv.Itoa(int(second.(float64))), member, http.StatusBadRequest)
+		one := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-15T12:00:00Z&to=2026-01-15T12:00:00Z", member)
+		if one.Code != http.StatusOK || decodeBody(t, one).(map[string]any)["comparison"] != nil {
+			t.Fatalf("insufficient history=%d %s", one.Code, one.Body.String())
+		}
+		empty := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-13T12:00:00Z&to=2026-01-13T12:00:00Z", member)
+		if empty.Code != http.StatusOK || len(decodeBody(t, empty).(map[string]any)["snapshots"].([]any)) != 0 {
+			t.Fatalf("empty history=%d %s", empty.Code, empty.Body.String())
+		}
+		if err := stores.Progression.InsertSnapshot(ctx, domain.Snapshot{CharacterID: alpha.ID, CapturedAt: now.Add(-time.Hour), ItemLevel: 620, MythicRating: 2500, BestKeyLevel: 12, RaidProgress: []byte("[]")}); err != nil {
+			t.Fatal(err)
+		}
+		identical := request(h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history?from=2026-01-15T10:00:00Z&to=2026-01-15T12:00:00Z", member)
+		identicalBody := decodeBody(t, identical).(map[string]any)
+		if identical.Code != http.StatusOK || identicalBody["comparison"].(map[string]any)["itemLevelDelta"] != float64(0) || identicalBody["comparison"].(map[string]any)["mythicRatingDelta"] != float64(0) {
+			t.Fatalf("identical history=%d %v", identical.Code, identicalBody)
+		}
+		for _, bad := range []string{"?from=nope", "?from=2026-01-01T00:00:00Z&to=2026-05-01T00:00:00Z", "?limit=501", "?compareFrom=1"} {
+			assertStatus(t, h, http.MethodGet, "/api/characters/"+intString(alpha.ID)+"/history"+bad, member, http.StatusBadRequest)
+		}
+		// The other guild's same-name character has no observable history here.
+		other := request(h, http.MethodGet, "/api/characters/"+intString(otherAlpha.ID)+"/history", member)
+		if other.Code != http.StatusOK || len(decodeBody(t, other).(map[string]any)["snapshots"].([]any)) != 0 {
+			t.Fatalf("cross-guild history=%d %s", other.Code, other.Body.String())
+		}
 	})
 	t.Run("me requires a session", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/auth/me", "", http.StatusUnauthorized)
