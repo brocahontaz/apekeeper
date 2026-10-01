@@ -2,11 +2,13 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/notify"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
@@ -231,4 +233,210 @@ func TestServiceNotifyPersistFailureIsLoggedNotFatal(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("missing sync notification status persist failed record")
+}
+
+// The live progress snapshot starts queued while the engine is still
+// reaching the roster, tracks the characters phase with the full total while
+// a run is blocked, and settles into a terminal, inactive snapshot that
+// keeps the final counts visible for the next poll.
+func TestServiceReportsLiveProgress(t *testing.T) {
+	ctx := context.Background()
+	blockedRoster := make(chan struct{})
+	blockedProfile := make(chan struct{})
+	e, _, g := testEngine(t, &fakeClient{
+		ilvl:        600,
+		rosterWait:  blockedRoster,
+		profileWait: blockedProfile,
+		profileErr:  errors.New("profile unavailable"),
+	})
+	service := Service{Engine: e, Guild: g}
+	service.Engine.Progress = service.ReportProgress
+
+	run, err := service.StartManual(ctx)
+	if err != nil || run.ID == 0 {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	p := service.Progress()
+	if !p.Active || p.Status != domain.RunRunning || p.Phase != domain.PhaseQueued ||
+		p.RunID != run.ID || p.StartedAt.IsZero() || p.Total != 0 {
+		t.Fatalf("queued progress=%+v", p)
+	}
+
+	close(blockedRoster)
+	// Once the roster lands the run blocks on the first profile: characters
+	// phase with the whole crew still unprocessed.
+	deadline := time.Now().Add(time.Second)
+	for {
+		p = service.Progress()
+		if p.Phase == domain.PhaseCharacters && p.Total == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("characters phase never observed; progress=%+v", p)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !p.Active || p.Status != domain.RunRunning || p.Updated != 0 || p.Failed != 0 {
+		t.Fatalf("blocked progress=%+v", p)
+	}
+
+	close(blockedProfile)
+	deadline = time.Now().Add(time.Second)
+	for {
+		p = service.Progress()
+		if !p.Active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run never went terminal; progress=%+v", p)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Status != domain.RunPartial || p.Phase != domain.PhaseFinalizing ||
+		p.Updated != 1 || p.Failed != 1 || p.Total != 2 || p.RunID != run.ID {
+		t.Fatalf("terminal progress=%+v, want partial 1 updated 1 failed of 2", p)
+	}
+}
+
+// A second trigger while the first is still blocked must stay
+// ErrAlreadyRunning and must not disturb the live snapshot the first run is
+// reporting.
+func TestServiceProgressRejectsConcurrentRun(t *testing.T) {
+	ctx := context.Background()
+	blockedProfile := make(chan struct{})
+	e, _, g := testEngine(t, &fakeClient{ilvl: 600, profileWait: blockedProfile})
+	service := Service{Engine: e, Guild: g}
+	service.Engine.Progress = service.ReportProgress
+	run, err := service.StartManual(ctx)
+	if err != nil || run.ID == 0 {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	if _, err := service.Start(ctx, "scheduled"); err != ErrAlreadyRunning {
+		t.Fatalf("concurrent start error=%v, want ErrAlreadyRunning", err)
+	}
+	p := service.Progress()
+	if !p.Active || p.RunID != run.ID {
+		t.Fatalf("progress=%+v, want the first run still live", p)
+	}
+	close(blockedProfile)
+}
+
+// A scheduled run is synchronous for the scheduler, but it is still an
+// admitted service run: cancellation must reach its engine context and settle
+// the ledger rather than only working for HTTP-started asynchronous runs.
+func TestServiceCancelStopsScheduledRun(t *testing.T) {
+	blockedRoster := make(chan struct{})
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600, rosterWait: blockedRoster})
+	service := Service{Engine: e, Guild: g}
+	result := make(chan struct {
+		run store.SyncRun
+		err error
+	}, 1)
+	go func() {
+		run, err := service.Start(context.Background(), "scheduled")
+		result <- struct {
+			run store.SyncRun
+			err error
+		}{run, err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for !service.Progress().Active {
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled run was not admitted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := service.Cancel(); err != nil {
+		t.Fatalf("Cancel() error=%v", err)
+	}
+	select {
+	case got := <-result:
+		if got.run.Status != domain.RunFailed || got.run.ErrorSummary != "sync cancelled" || got.err == nil {
+			t.Fatalf("cancelled scheduled run=%+v err=%v", got.run, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduled run did not stop after cancellation")
+	}
+	history, err := s.SyncRuns.History(context.Background(), g.ID, 1)
+	if err != nil || len(history) != 1 || history[0].Status != domain.RunFailed || history[0].ErrorSummary != "sync cancelled" {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+// uncooperativeClient simulates an upstream call that does not honor context
+// cancellation, proving Shutdown waits for the service's engine goroutine.
+type uncooperativeClient struct {
+	*fakeClient
+	release <-chan struct{}
+}
+
+func (c *uncooperativeClient) GuildRoster(context.Context, string, string) (dto.GuildRoster, error) {
+	<-c.release
+	return c.fakeClient.GuildRoster(context.Background(), "", "")
+}
+
+func TestServiceShutdownWaitsForActiveRun(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeClient{ilvl: 600}
+	e, s, g := testEngine(t, f)
+	e.Client = &uncooperativeClient{fakeClient: f, release: release}
+	service := Service{Engine: e, Guild: g}
+	run, err := service.StartManual(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdown:
+		t.Fatalf("Shutdown returned before the engine stopped: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-shutdown:
+		if err != nil {
+			t.Fatalf("Shutdown() error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not wait for the engine to settle")
+	}
+	history, err := s.SyncRuns.History(context.Background(), g.ID, 1)
+	if err != nil || len(history) != 1 || history[0].ID != run.ID || history[0].Status != domain.RunFailed {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+func TestServiceRetryRecordsRepeatedCharacterFailure(t *testing.T) {
+	e, s, g := testEngine(t, &fakeClient{ilvl: 600, profileErr: errors.New("profile unavailable")})
+	service := Service{Engine: e, Guild: g}
+	source, err := service.Start(context.Background(), "manual")
+	if err != nil || source.Status != domain.RunPartial || source.Failed != 1 {
+		t.Fatalf("source=%+v err=%v", source, err)
+	}
+	service.Engine.Client = &fakeClient{ilvl: 600, profileErr: errors.New("profile unavailable")}
+	retry, err := service.StartRetry(context.Background(), source.ID)
+	if err != nil || retry.Trigger != "retry" || retry.Status != domain.RunRunning {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	var history []store.SyncRun
+	for {
+		history, err = s.SyncRuns.History(context.Background(), g.ID, 2)
+		if err == nil && len(history) == 2 && history[0].ID == retry.ID && history[0].Status != domain.RunRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retry did not settle: history=%+v err=%v", history, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if history[0].ID != retry.ID || history[0].Trigger != "retry" || history[0].Status != domain.RunFailed ||
+		history[0].Total != 1 || history[0].Updated != 0 || history[0].Failed != 1 || len(history[0].Detail) == 0 {
+		t.Fatalf("retry history=%+v", history[0])
+	}
+	if history[1].ID != source.ID || history[1].Status != domain.RunPartial || history[1].Failed != 1 {
+		t.Fatalf("source history=%+v", history[1])
+	}
 }

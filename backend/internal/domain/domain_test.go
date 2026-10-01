@@ -32,3 +32,14 @@ func TestSnapshotsAndTransitions(t *testing.T) {
 		t.Fatal("transition")
 	}
 }
+
+func TestCoercePhase(t *testing.T) {
+	if CoercePhase(PhaseQueued) != PhaseQueued || CoercePhase(PhaseRoster) != PhaseRoster ||
+		CoercePhase(PhaseTierAnchor) != PhaseTierAnchor || CoercePhase(PhaseCharacters) != PhaseCharacters ||
+		CoercePhase(PhaseFinalizing) != PhaseFinalizing {
+		t.Fatal("known phases must survive coercion")
+	}
+	if CoercePhase("") != PhaseQueued || CoercePhase(Phase("mystery")) != PhaseQueued {
+		t.Fatal("unknown phases must coerce to queued")
+	}
+}

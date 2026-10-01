@@ -89,6 +89,7 @@ func main() {
 		Log:      logg,
 		Notifier: notify.NewDiscord(cfg.DiscordWebhookURL, logg),
 	}
+	service.Engine.Progress = service.ReportProgress
 	scheduler := sched.New(cfg.SyncSchedule, logg)
 	go scheduler.Run(ctx, func(c context.Context) {
 		if _, err := service.Start(c, "scheduled"); err != nil {
@@ -118,12 +119,14 @@ func main() {
 		return r.ID, e
 	})
 	api := httpapi.New(httpapi.API{
-		Stores:    stores,
-		Auth:      manager,
-		GuildSlug: guild.Slug,
-		Trigger:   trigger,
-		Ping:      pool,
-		StaticDir: cfg.StaticDir,
+		Stores:     stores,
+		Auth:       manager,
+		GuildSlug:  guild.Slug,
+		Trigger:    trigger,
+		Progress:   service,
+		Operations: service,
+		Ping:       pool,
+		StaticDir:  cfg.StaticDir,
 	})
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
@@ -135,6 +138,7 @@ func main() {
 		shutdown, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
 		_ = server.Shutdown(shutdown)
+		_ = service.Shutdown(shutdown)
 	}()
 	logg.Info("server starting", "port", cfg.ServerPort)
 	if err = server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

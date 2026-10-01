@@ -3,8 +3,10 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,14 +33,19 @@ type Service struct {
 	running  bool
 	started  time.Time
 	last     store.SyncRun
+	// progress is the live in-memory snapshot reported to the API; updates
+	// are never persisted, Finish records the final outcome in the store.
+	progress domain.Progress
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 func (s *Service) Start(ctx context.Context, trigger string) (store.SyncRun, error) {
-	r, e := s.begin(ctx, trigger)
+	r, runCtx, e := s.begin(ctx, ctx, trigger)
 	if e != nil {
 		return r, e
 	}
-	r, e = s.Engine.RunGuildSyncWithRun(ctx, s.Guild, r)
+	r, e = s.Engine.RunGuildSyncWithRun(runCtx, s.Guild, r)
 	s.complete(r)
 	return r, e
 }
@@ -46,43 +53,132 @@ func (s *Service) Start(ctx context.Context, trigger string) (store.SyncRun, err
 // StartManual creates the run before returning so callers can report its ID,
 // then completes it asynchronously.
 func (s *Service) StartManual(ctx context.Context) (store.SyncRun, error) {
-	r, e := s.begin(ctx, "manual")
+	return s.startAsync(ctx, "manual", RunOptions{})
+}
+
+// StartDryRun validates and fetches the full roster without changing guild
+// data. Its ledger entry is explicitly marked dry-run.
+func (s *Service) StartDryRun(ctx context.Context) (store.SyncRun, error) {
+	return s.startAsync(ctx, "dry-run", RunOptions{DryRun: true})
+}
+
+func (s *Service) StartRetry(ctx context.Context, sourceID int64) (store.SyncRun, error) {
+	source, err := s.Engine.Stores.SyncRuns.ByID(ctx, s.Guild.ID, sourceID)
+	if err != nil {
+		return store.SyncRun{}, ErrRetryUnavailable
+	}
+	if source.Status == domain.RunRunning || source.Failed == 0 {
+		return store.SyncRun{}, ErrRetryUnavailable
+	}
+	var detail map[string]string
+	_ = json.Unmarshal(source.Detail, &detail)
+	if len(detail) == 0 {
+		return store.SyncRun{}, ErrRetryUnavailable
+	}
+	names := make(map[string]bool, len(detail))
+	for n := range detail {
+		names[strings.ToLower(n)] = true
+	}
+	return s.startAsync(ctx, "retry", RunOptions{Names: names})
+}
+
+func (s *Service) startAsync(ctx context.Context, trigger string, options RunOptions) (store.SyncRun, error) {
+	// The request context is only for admitting the run. The run itself must
+	// outlive the HTTP request and be controlled by Cancel or Shutdown.
+	r, runCtx, e := s.begin(ctx, context.Background(), trigger)
 	if e != nil {
 		return r, e
 	}
-	go func() {
-		r, _ = s.Engine.RunGuildSyncWithRun(context.WithoutCancel(ctx), s.Guild, r)
-		s.complete(r)
-	}()
+	s.mu.Lock()
+	s.progress.DryRun = options.DryRun
+	s.mu.Unlock()
+	go func(run store.SyncRun) {
+		completed, _ := s.Engine.RunGuildSyncWithOptions(runCtx, s.Guild, run, options)
+		s.complete(completed)
+	}(r)
 	return r, nil
 }
 
-func (s *Service) begin(ctx context.Context, trigger string) (store.SyncRun, error) {
+// begin admits a run and installs its cancellation lifecycle before any engine
+// work starts. createCtx controls only the ledger write, while runParent
+// controls the work itself (asynchronous requests deliberately use a detached
+// parent so their request cancellation cannot abort an admitted run).
+func (s *Service) begin(createCtx, runParent context.Context, trigger string) (store.SyncRun, context.Context, error) {
 	s.mu.Lock()
 	if !domain.CanStart(s.running) {
 		s.mu.Unlock()
-		return store.SyncRun{}, ErrAlreadyRunning
+		return store.SyncRun{}, nil, ErrAlreadyRunning
 	}
 	s.running = true
-	r, e := s.Engine.Stores.SyncRuns.Create(ctx, s.Guild.ID, trigger)
+	r, e := s.Engine.Stores.SyncRuns.Create(createCtx, s.Guild.ID, trigger)
+	var runCtx context.Context
 	if e != nil {
 		s.running = false
+		// A run that never started leaves nothing live to report.
+		s.progress = domain.Progress{}
 	} else {
+		runCtx, s.cancel = context.WithCancel(runParent)
+		s.done = make(chan struct{})
 		s.started = time.Now()
+		s.progress = domain.Progress{
+			Active:    true,
+			RunID:     r.ID,
+			Status:    domain.RunRunning,
+			Phase:     domain.PhaseQueued,
+			StartedAt: s.started,
+		}
 	}
 	s.mu.Unlock()
 	if e == nil && s.Log != nil {
 		s.Log.Info("sync run started", "runId", r.ID, "guild", s.Guild.Slug, "trigger", trigger)
 	}
-	return r, e
+	return r, runCtx, e
+}
+
+// ReportProgress folds an engine progress event into the live snapshot. The
+// engine fires it from its counter critical section, so this update is
+// guarded here and stays free of any blocking work.
+func (s *Service) ReportProgress(phase domain.Phase, updated, failed, total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running {
+		return
+	}
+	s.progress.Phase = domain.CoercePhase(phase)
+	s.progress.Updated = updated
+	s.progress.Failed = failed
+	s.progress.Total = total
+}
+
+// Progress reports the live run snapshot; the last snapshot stays visible
+// with Active=false after completion so clients can observe the terminal
+// transition. A service that has never run answers with the zero snapshot.
+func (s *Service) Progress() domain.Progress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.progress
 }
 
 func (s *Service) complete(r store.SyncRun) {
 	s.mu.Lock()
 	s.running = false
+	s.cancel = nil
+	done := s.done
+	s.done = nil
 	s.last = r
 	started := s.started
+	// The terminal snapshot keeps the run's final counts visible; the next
+	// begin overwrites it.
+	s.progress.Active = false
+	s.progress.Status = r.Status
+	s.progress.Phase = domain.PhaseFinalizing
+	s.progress.Updated = r.Updated
+	s.progress.Failed = r.Failed
+	s.progress.Total = r.Total
 	s.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
 	// Single completion log covering both the synchronous and the manual
 	// asynchronous paths.
 	if s.Log != nil {
@@ -155,10 +251,41 @@ func runFailureReasons(r store.SyncRun) []string {
 }
 
 var ErrAlreadyRunning = &runningError{}
+var ErrRetryUnavailable = errors.New("retry unavailable: completed run has no recorded character failures")
+var ErrNotRunning = errors.New("no sync is running")
 
 type runningError struct{}
 
-func (*runningError) Error() string      { return "sync already running" }
+func (*runningError) Error() string { return "sync already running" }
+func (s *Service) Cancel() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.cancel == nil {
+		return ErrNotRunning
+	}
+	s.cancel()
+	return nil
+}
+
+// Shutdown cancels a manual operation and waits for its engine workers to
+// finish, so process shutdown does not leave detached sync goroutines behind.
+func (s *Service) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	done := s.done
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func (s *Service) Status() store.SyncRun { s.mu.Lock(); defer s.mu.Unlock(); return s.last }
 func (s *Service) History(ctx context.Context, limit int) ([]store.SyncRun, error) {
 	return s.Engine.Stores.SyncRuns.History(ctx, s.Guild.ID, limit)
