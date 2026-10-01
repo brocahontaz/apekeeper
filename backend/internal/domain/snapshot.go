@@ -1,14 +1,20 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Snapshot struct {
+	ID           int64     `json:"id"`
 	CharacterID  int64     `json:"characterId"`
 	CapturedAt   time.Time `json:"capturedAt"`
 	ItemLevel    float64   `json:"itemLevel"`
 	MythicRating float64   `json:"mythicRating"`
 	BestKeyLevel int       `json:"bestKeyLevel"`
-	RaidProgress []byte    `json:"-"`
+	// RawMessage preserves the jsonb snapshot as JSON on API responses rather
+	// than encoding its bytes as a base64 string.
+	RaidProgress json.RawMessage `json:"raidProgress"`
 }
 
 func SnapshotChanged(prev, next Snapshot) bool {

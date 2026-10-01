@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
@@ -10,6 +11,41 @@ import (
 )
 
 type ProgressionStore struct{ pool *pgxpool.Pool }
+
+// History is a bounded, oldest-first snapshot series. The character join is
+// intentional: it makes the guild boundary part of the history query rather
+// than relying on a caller having checked it separately.
+func (s ProgressionStore) History(ctx context.Context, guildID, characterID int64, from, to time.Time, limit int) ([]domain.Snapshot, error) {
+	rows, err := s.pool.Query(ctx, `SELECT p.id,p.character_id,p.captured_at,
+		COALESCE(p.item_level,0),COALESCE(p.mythic_rating,0),COALESCE(p.best_key_level,0),COALESCE(p.raid_progress,'[]')
+		FROM progression_snapshots p JOIN characters c ON c.id=p.character_id
+		WHERE c.guild_id=$1 AND p.character_id=$2 AND p.captured_at >= $3 AND p.captured_at <= $4
+		ORDER BY p.captured_at DESC,p.id DESC LIMIT $5`, guildID, characterID, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Snapshot{}
+	for rows.Next() {
+		var x domain.Snapshot
+		if err := rows.Scan(&x.ID, &x.CharacterID, &x.CapturedAt, &x.ItemLevel, &x.MythicRating, &x.BestKeyLevel, &x.RaidProgress); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Fetching the newest bounded window preserves a useful default for busy
+	// characters; the API contract remains chronological for chart consumers.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CapturedAt.Equal(out[j].CapturedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CapturedAt.Before(out[j].CapturedAt)
+	})
+	return out, nil
+}
 
 func (s ProgressionStore) UpsertMythicPlus(ctx context.Context, m domain.MythicPlus) error {
 	// The runs snapshot rides in the legacy dungeons jsonb column; a nil
@@ -83,14 +119,14 @@ func (s ProgressionStore) ReplaceRaids(ctx context.Context, characterID int64, r
 func (s ProgressionStore) LastSnapshot(ctx context.Context, id int64) (domain.Snapshot, error) {
 	var x domain.Snapshot
 	e := s.pool.QueryRow(ctx, `SELECT
-		character_id,captured_at,
+		id,character_id,captured_at,
 		COALESCE(item_level,0),COALESCE(mythic_rating,0),COALESCE(best_key_level,0),
 		COALESCE(raid_progress,'[]')
 		FROM progression_snapshots
 		WHERE character_id=$1
-		ORDER BY captured_at DESC
+		ORDER BY captured_at DESC,id DESC
 		LIMIT 1`, id).
-		Scan(&x.CharacterID, &x.CapturedAt, &x.ItemLevel, &x.MythicRating, &x.BestKeyLevel, &x.RaidProgress)
+		Scan(&x.ID, &x.CharacterID, &x.CapturedAt, &x.ItemLevel, &x.MythicRating, &x.BestKeyLevel, &x.RaidProgress)
 	return x, e
 }
 

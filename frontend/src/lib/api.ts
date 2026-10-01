@@ -26,6 +26,30 @@ export type Character = {
   stale: boolean;
   [key: string]: unknown;
 };
+export type Snapshot = {
+  id: number;
+  characterId: number;
+  capturedAt: string;
+  itemLevel: number;
+  mythicRating: number;
+  bestKeyLevel: number;
+  // Snapshots normally retain Blizzard's raid object, while snapshots with no
+  // raid data are serialized by the backend as an empty JSON array.
+  raidProgress?: Record<string, unknown> | [];
+};
+export type History = {
+  from: string;
+  to: string;
+  retentionDays: number;
+  snapshots: Snapshot[];
+  comparison: {
+    from: Snapshot;
+    to: Snapshot;
+    itemLevelDelta: number;
+    mythicRatingDelta: number;
+    bestKeyLevelDelta: number;
+  } | null;
+};
 export type MythicRun = {
   dungeon: string;
   level: number;
@@ -91,6 +115,13 @@ export type Dashboard = {
   };
   lastSync?: { status?: string; startedAt?: string };
   notableChanges: { name: string; ratingDelta?: number; itemLevelDelta?: number }[];
+  trends: {
+    capturedAt: string;
+    averageItemLevel: number;
+    averageRating: number;
+    staleCount: number;
+    raidProgress: { raidName: string; difficulty: string; progress: number; totalBosses: number }[];
+  }[];
 };
 export class ApiError extends Error {
   constructor(
@@ -121,6 +152,7 @@ export const client = {
   dashboard: () => api<Dashboard>("/api/dashboard"),
   roster: (q = "") => api<RosterPage>(`/api/roster${q}`),
   character: (name: string) => api<Character>(`/api/characters/${encodeURIComponent(name)}`),
+  history: (id: number, q = "") => api<History>(`/api/characters/${id}/history${q}`),
   runs: () => api<SyncRun[]>("/api/sync/runs"),
   progress: () => api<SyncProgress>("/api/sync/progress"),
   sync: () => api<{ runId: number }>("/api/sync/run", { method: "POST" }),

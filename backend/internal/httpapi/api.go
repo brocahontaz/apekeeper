@@ -52,6 +52,9 @@ type API struct {
 	Operations SyncOperations
 	Ping       db.Pinger
 	Now        func() time.Time
+	// SnapshotRetentionDays is surfaced with history responses. Zero preserves
+	// the configured application's historical default of 90 days.
+	SnapshotRetentionDays int
 	// Frontend optionally supplies a built SPA filesystem. When nil, the
 	// conventional ./frontend/dist directory is used if it exists.
 	Frontend  fs.FS
@@ -77,6 +80,7 @@ func New(a API) http.Handler {
 	m.Handle("GET /api/roster", a.requireAuth(http.HandlerFunc(a.roster)))
 	m.Handle("GET /api/roster/export", a.requireAuth(http.HandlerFunc(a.rosterExport)))
 	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
+	m.Handle("GET /api/characters/{id}/history", a.requireAuth(http.HandlerFunc(a.characterHistory)))
 	m.Handle("GET /api/sync/runs",
 		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
 	m.Handle("GET /api/sync/progress",
@@ -293,6 +297,120 @@ func (a API) character(w http.ResponseWriter, r *http.Request) {
 	out["snapshots"] = d.Snapshots
 	jsonOut(w, 200, out)
 }
+
+const historyMaxDays = 90
+const historyMaxLimit = 500
+
+func parseHistoryQuery(q url.Values, now time.Time) (time.Time, time.Time, int, int64, int64, error) {
+	to := now.UTC()
+	from := to.AddDate(0, 0, -30)
+	parseDate := func(key string, fallback time.Time) (time.Time, error) {
+		v := q.Get(key)
+		if v == "" {
+			return fallback, nil
+		}
+		x, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return time.Time{}, errors.New("invalid history date")
+		}
+		return x.UTC(), nil
+	}
+	var err error
+	if from, err = parseDate("from", from); err != nil {
+		return from, to, 0, 0, 0, err
+	}
+	if to, err = parseDate("to", to); err != nil {
+		return from, to, 0, 0, 0, err
+	}
+	if from.After(to) || to.Sub(from) > historyMaxDays*24*time.Hour || to.After(now.UTC().Add(24*time.Hour)) {
+		return from, to, 0, 0, 0, errors.New("history range must be within 90 days")
+	}
+	limit := 200
+	if v := q.Get("limit"); v != "" {
+		var ok bool
+		limit, ok = integer(v)
+		if !ok || limit < 1 || limit > historyMaxLimit {
+			return from, to, 0, 0, 0, errors.New("invalid history limit")
+		}
+	}
+	parseID := func(key string) (int64, error) {
+		v := q.Get(key)
+		if v == "" {
+			return 0, nil
+		}
+		id, e := strconv.ParseInt(v, 10, 64)
+		if e != nil || id <= 0 {
+			return 0, errors.New("invalid comparison snapshot id")
+		}
+		return id, nil
+	}
+	left, err := parseID("compareFrom")
+	if err != nil {
+		return from, to, 0, 0, 0, err
+	}
+	right, err := parseID("compareTo")
+	if err != nil {
+		return from, to, 0, 0, 0, err
+	}
+	if (left == 0) != (right == 0) || left == right && left != 0 {
+		return from, to, 0, 0, 0, errors.New("two distinct comparison snapshot ids are required")
+	}
+	return from, to, limit, left, right, nil
+}
+
+func (a API) characterHistory(w http.ResponseWriter, r *http.Request) {
+	g, err := a.guild(r.Context())
+	if err != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(w, 400, "invalid character id")
+		return
+	}
+	from, to, limit, left, right, err := parseHistoryQuery(r.URL.Query(), a.now())
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	snaps, err := a.Stores.Progression.History(r.Context(), g.ID, id, from, to, limit)
+	if err != nil {
+		fail(w, 500, "history lookup failed")
+		return
+	}
+	// An empty result is also how an inaccessible character appears, preventing
+	// history probing across guild boundaries while retaining a useful empty UI.
+	var comparison any
+	if left != 0 {
+		var before, after domain.Snapshot
+		var foundL, foundR bool
+		for _, s := range snaps {
+			if s.ID == left {
+				before, foundL = s, true
+			}
+			if s.ID == right {
+				after, foundR = s, true
+			}
+		}
+		// Validate selected IDs even when the bounded range returns fewer than
+		// two snapshots; otherwise an invalid selection silently looks like no
+		// comparison.
+		if !foundL || !foundR {
+			fail(w, 400, "comparison snapshots are unavailable")
+			return
+		}
+		comparison = map[string]any{"from": before, "to": after, "itemLevelDelta": after.ItemLevel - before.ItemLevel, "mythicRatingDelta": after.MythicRating - before.MythicRating, "bestKeyLevelDelta": after.BestKeyLevel - before.BestKeyLevel}
+	} else if len(snaps) >= 2 {
+		before, after := snaps[len(snaps)-2], snaps[len(snaps)-1]
+		comparison = map[string]any{"from": before, "to": after, "itemLevelDelta": after.ItemLevel - before.ItemLevel, "mythicRatingDelta": after.MythicRating - before.MythicRating, "bestKeyLevelDelta": after.BestKeyLevel - before.BestKeyLevel}
+	}
+	retentionDays := a.SnapshotRetentionDays
+	if retentionDays <= 0 {
+		retentionDays = historyMaxDays
+	}
+	jsonOut(w, 200, map[string]any{"from": from, "to": to, "retentionDays": retentionDays, "snapshots": snaps, "comparison": comparison})
+}
 func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
 	if e != nil {
@@ -420,6 +538,11 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	if rated > 0 {
 		average = ratingTotal / float64(rated)
 	}
+	trends, e := a.Stores.Characters.TrendsByGuild(r.Context(), g.ID, a.now().AddDate(0, 0, -30), a.now(), a.now().Add(-7*24*time.Hour), 31)
+	if e != nil {
+		fail(w, 500, "trend lookup failed")
+		return
+	}
 	jsonOut(w, 200, map[string]any{
 		"rosterSize":        len(chars),
 		"maxLevelMembers":   max,
@@ -437,6 +560,7 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 		},
 		"lastSync":       last,
 		"notableChanges": notable,
+		"trends":         trends,
 	})
 }
 func (a API) syncRuns(w http.ResponseWriter, r *http.Request) {

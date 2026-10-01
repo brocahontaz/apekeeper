@@ -29,6 +29,19 @@ type CharacterPage struct {
 	Items []domain.Character
 	Total int
 }
+type GuildTrend struct {
+	CapturedAt       time.Time        `json:"capturedAt"`
+	AverageItemLevel float64          `json:"averageItemLevel"`
+	AverageRating    float64          `json:"averageRating"`
+	StaleCount       int              `json:"staleCount"`
+	RaidProgress     []GuildTrendRaid `json:"raidProgress"`
+}
+type GuildTrendRaid struct {
+	RaidName    string `json:"raidName"`
+	Difficulty  string `json:"difficulty"`
+	Progress    int    `json:"progress"`
+	TotalBosses int    `json:"totalBosses"`
+}
 
 // DashboardCharacter pairs one character with the aggregates the dashboard
 // used to load through a per-character Detail call: the best keystone level
@@ -247,7 +260,7 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 		d.Raids = append(d.Raids, x)
 	}
 	rows, err = s.pool.Query(ctx, `SELECT
-		captured_at,
+		id,captured_at,
 		COALESCE(item_level,0),COALESCE(mythic_rating,0),COALESCE(best_key_level,0),
 		COALESCE(raid_progress,'[]')
 		FROM progression_snapshots
@@ -260,12 +273,74 @@ func (s CharacterStore) Detail(ctx context.Context, guildID, id int64, since tim
 	for rows.Next() {
 		var x domain.Snapshot
 		x.CharacterID = id
-		if err = rows.Scan(&x.CapturedAt, &x.ItemLevel, &x.MythicRating, &x.BestKeyLevel, &x.RaidProgress); err != nil {
+		if err = rows.Scan(&x.ID, &x.CapturedAt, &x.ItemLevel, &x.MythicRating, &x.BestKeyLevel, &x.RaidProgress); err != nil {
 			return d, err
 		}
 		d.Snapshots = append(d.Snapshots, x)
 	}
 	return d, rows.Err()
+}
+
+// TrendsByGuild uses one set-based snapshot query for the entire guild. Each
+// character contributes only its latest snapshot on a day, so repeat syncs do
+// not overweight a roster member. Characters are intentionally not filtered by
+// freshness; inactive members with retained snapshots remain in the averages.
+// Raid progress is expanded and reduced in SQL from the same representative
+// snapshots, avoiding per-character history queries.
+//
+// existing progression_snapshots(character_id,captured_at) index serves the
+// character lookup and time ordering; a guild-leading snapshot index would not
+// be selective without duplicating guild_id on immutable snapshot rows.
+func (s CharacterStore) TrendsByGuild(ctx context.Context, guildID int64, from, to, staleBefore time.Time, limit int) ([]GuildTrend, error) {
+	rows, err := s.pool.Query(ctx, `WITH latest AS (
+		SELECT DISTINCT ON (date_trunc('day',p.captured_at AT TIME ZONE 'UTC'),p.character_id)
+			date_trunc('day',p.captured_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS captured_at,p.character_id,
+			p.item_level,p.mythic_rating,p.raid_progress
+		FROM progression_snapshots p JOIN characters c ON c.id=p.character_id
+		WHERE c.guild_id=$1 AND p.captured_at >= $2 AND p.captured_at <= $3
+		ORDER BY date_trunc('day',p.captured_at AT TIME ZONE 'UTC'),p.character_id,p.captured_at DESC,p.id DESC
+	), daily AS (
+		SELECT captured_at,AVG(COALESCE(item_level,0)) AS average_item_level,
+			AVG(COALESCE(mythic_rating,0)) AS average_rating
+		FROM latest GROUP BY captured_at
+	), raid_rows AS (
+		SELECT l.captured_at,instance->'instance'->>'name' AS raid_name,
+			mode->'difficulty'->>'name' AS difficulty,
+			MAX(COALESCE((mode->'progress'->>'completed_count')::int,0)) AS progress,
+			MAX(COALESCE((mode->'progress'->>'total_count')::int,0)) AS total_bosses
+		FROM latest l
+		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.raid_progress,'[]'::jsonb)->'expansions') expansion
+		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(expansion->'instances','[]'::jsonb)) instance
+		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(instance->'modes','[]'::jsonb)) mode
+		WHERE COALESCE(instance->'instance'->>'name','') <> '' AND COALESCE(mode->'difficulty'->>'name','') <> ''
+		GROUP BY l.captured_at,instance->'instance'->>'name',mode->'difficulty'->>'name'
+	), raids AS (
+		SELECT captured_at,jsonb_agg(jsonb_build_object('raidName',raid_name,'difficulty',difficulty,
+			'progress',progress,'totalBosses',total_bosses) ORDER BY raid_name,difficulty) AS raid_progress
+		FROM raid_rows GROUP BY captured_at
+	), stale AS (
+		SELECT COUNT(*) AS count FROM characters WHERE guild_id=$1 AND (synced_at IS NULL OR synced_at < $4)
+	) SELECT daily.captured_at,daily.average_item_level,daily.average_rating,stale.count,
+		COALESCE(raids.raid_progress,'[]'::jsonb)
+	FROM daily CROSS JOIN stale LEFT JOIN raids ON raids.captured_at=daily.captured_at
+	ORDER BY daily.captured_at LIMIT $5`, guildID, from, to, staleBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []GuildTrend{}
+	for rows.Next() {
+		var x GuildTrend
+		var raids []byte
+		if err := rows.Scan(&x.CapturedAt, &x.AverageItemLevel, &x.AverageRating, &x.StaleCount, &raids); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raids, &x.RaidProgress); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 
 // DetailByName resolves a URL-safe display name within its guild before

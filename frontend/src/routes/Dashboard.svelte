@@ -77,6 +77,21 @@
         </p>{:else}<p>No notable movement recorded yet.</p>{/each}
     </section>
     <section>
+      <h2>Guild trend</h2>
+      {#each data.trends as trend}<p>
+          {new Date(trend.capturedAt).toLocaleDateString()}: {trend.averageItemLevel.toFixed(1)} iLvl
+          · {number(trend.averageRating)} M+ · {trend.staleCount} stale
+          {#if trend.raidProgress.length}
+            · {trend.raidProgress
+              .map(
+                (raid) =>
+                  `${raid.raidName} ${raid.difficulty} ${raid.progress}/${raid.totalBosses}`,
+              )
+              .join(", ")}
+          {/if}
+        </p>{:else}<p>No retained snapshots to summarize yet.</p>{/each}
+    </section>
+    <section>
       <h2>Raid Progression</h2>
       {#each raids as [raidName, rows]}<div class="raid-group">
           <small>{raidName}</small>

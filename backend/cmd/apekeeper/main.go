@@ -119,14 +119,15 @@ func main() {
 		return r.ID, e
 	})
 	api := httpapi.New(httpapi.API{
-		Stores:     stores,
-		Auth:       manager,
-		GuildSlug:  guild.Slug,
-		Trigger:    trigger,
-		Progress:   service,
-		Operations: service,
-		Ping:       pool,
-		StaticDir:  cfg.StaticDir,
+		Stores:                stores,
+		Auth:                  manager,
+		GuildSlug:             guild.Slug,
+		Trigger:               trigger,
+		Progress:              service,
+		Operations:            service,
+		Ping:                  pool,
+		SnapshotRetentionDays: cfg.SnapshotRetentionDays,
+		StaticDir:             cfg.StaticDir,
 	})
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
