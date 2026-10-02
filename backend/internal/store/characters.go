@@ -12,11 +12,14 @@ import (
 
 type CharacterStore struct{ pool *pgxpool.Pool }
 type CharacterFilter struct {
-	Class, Spec    string
-	Rank, MinLevel *int
-	MinRating      *float64
-	Name           string
-	StaleBefore    *time.Time
+	Class, Spec                                                             string
+	Rank, MinLevel                                                          *int
+	MinRating                                                               *float64
+	Name                                                                    string
+	StaleBefore                                                             *time.Time
+	MythicSeason, RaidTier, RaidDifficulty, OfficerStatus, OfficerTag, Role string
+	MinRaidProgress                                                         *int
+	MaxAge                                                                  *time.Duration
 }
 type CharacterDetail struct {
 	Character domain.Character
@@ -529,7 +532,42 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 		add("c.level >= $%d", *f.MinLevel)
 	}
 	if f.MinRating != nil {
-		add("EXISTS (SELECT 1 FROM mythic_plus m WHERE m.character_id=c.id AND m.overall_rating >= $%d)", *f.MinRating)
+		if f.MythicSeason != "" {
+			args = append(args, f.MythicSeason, *f.MinRating)
+			where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM mythic_plus m WHERE m.character_id=c.id AND m.season_slug=$%d AND m.overall_rating >= $%d)", len(args)-1, len(args)))
+		} else {
+			add("EXISTS (SELECT 1 FROM mythic_plus m WHERE m.character_id=c.id AND m.overall_rating >= $%d)", *f.MinRating)
+		}
+	} else if f.MythicSeason != "" {
+		add("EXISTS (SELECT 1 FROM mythic_plus m WHERE m.character_id=c.id AND m.season_slug=$%d)", f.MythicSeason)
+	}
+	if f.RaidTier != "" || f.RaidDifficulty != "" || f.MinRaidProgress != nil {
+		conditions := []string{"r.character_id=c.id"}
+		if f.RaidTier != "" {
+			args = append(args, f.RaidTier, f.RaidTier)
+			conditions = append(conditions, fmt.Sprintf("(r.raid_slug=$%d OR r.raid_name=$%d)", len(args)-1, len(args)))
+		}
+		if f.RaidDifficulty != "" {
+			args = append(args, f.RaidDifficulty)
+			conditions = append(conditions, fmt.Sprintf("r.difficulty=$%d", len(args)))
+		}
+		if f.MinRaidProgress != nil {
+			args = append(args, *f.MinRaidProgress)
+			conditions = append(conditions, fmt.Sprintf("COALESCE(r.progress,0)>=$%d", len(args)))
+		}
+		where = append(where, "EXISTS (SELECT 1 FROM raid_progression r WHERE "+strings.Join(conditions, " AND ")+")")
+	}
+	if f.MaxAge != nil {
+		add("(c.synced_at IS NOT NULL AND c.synced_at >= now() - ($%d * interval '1 day'))", f.MaxAge.Hours()/24)
+	}
+	if f.OfficerStatus != "" {
+		add("EXISTS (SELECT 1 FROM officer_character_state os WHERE os.character_id=c.id AND os.lifecycle_status=$%d)", f.OfficerStatus)
+	}
+	if f.OfficerTag != "" {
+		add("EXISTS (SELECT 1 FROM officer_character_state os WHERE os.character_id=c.id AND $%d = ANY(os.tags))", f.OfficerTag)
+	}
+	if f.Role != "" {
+		add("COALESCE(u.app_role,'member')=$%d", f.Role)
 	}
 	if f.Name != "" {
 		add("c.normalized_name LIKE $%d", "%"+domain.NormalizeCharacterName(f.Name)+"%")
@@ -539,7 +577,7 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 	}
 	whereClause := strings.Join(where, " AND ")
 	var total int
-	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM characters c WHERE "+whereClause, args...).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM characters c LEFT JOIN users u ON u.id=c.user_id WHERE "+whereClause, args...).Scan(&total); err != nil {
 		return CharacterPage{}, err
 	}
 	q := `SELECT
@@ -548,17 +586,18 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 		COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
 		COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
 		COALESCE(c.race_name,''),COALESCE(c.gender,''),
+		COALESCE(u.app_role,'member'),
 		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0),
 		COALESCE((SELECT MAX(best_key_level) FROM mythic_plus m WHERE m.character_id=c.id),0),
 		COALESCE(c.synced_at,'epoch')
-		FROM characters c
+		FROM characters c LEFT JOIN users u ON u.id=c.user_id
 		WHERE ` + whereClause + " ORDER BY " + sort.SQL()
 	if descending {
 		q += " DESC"
 	} else {
 		q += " ASC"
 	}
-	q += ", c.display_name ASC"
+	q += ", c.display_name ASC, c.id ASC"
 	if limit > 0 {
 		args = append(args, limit, offset)
 		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
@@ -579,6 +618,7 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 			&c.SpecID, &c.SpecName,
 			&c.Level, &c.ItemLevel, &c.GuildRank,
 			&c.RaceName, &c.Gender,
+			&c.Role,
 			&c.MythicRating, &c.BestKeyLevel, &c.SyncedAt,
 		)
 		if e != nil {

@@ -9,76 +9,82 @@
   } from "$lib/roster";
   import { debounce } from "$lib/debounce";
   import RosterTable from "$components/RosterTable.svelte";
-  const url = new URLSearchParams(location.search);
-  let rows = $state<Character[]>([]);
-  let search = $state(url.get("search") ?? "");
-  let klass = $state(url.get("class") ?? "");
-  let spec = $state(url.get("spec") ?? "");
-  let minLevel = $state<number | null>(Number(url.get("minLevel")) || null);
-  let minRating = $state<number | null>(Number(url.get("minRating")) || null);
-  let stale = $state(url.get("stale") === "true");
-  let page = $state(Number(url.get("page")) || 1);
-  let sort = $state<RosterSort>((url.get("sort") as RosterSort) || "guildRank");
-  let direction = $state<RosterDirection>(
-    url.get("direction") === "descending" ? "descending" : "ascending",
-  );
+  const read = () => new URLSearchParams(location.search);
+  const u = read();
+  let rows = $state<Character[]>([]),
+    total = $state(0),
+    loading = $state(true),
+    error = $state("");
+  let search = $state(u.get("search") ?? ""),
+    klass = $state(u.get("class") ?? ""),
+    spec = $state(u.get("spec") ?? "");
+  let minLevel = $state<number | null>(Number(u.get("minLevel")) || null),
+    minRating = $state<number | null>(Number(u.get("minRating")) || null);
+  let stale = $state(u.get("stale") === "true"),
+    page = $state(Number(u.get("page")) || 1);
+  let sort = $state<RosterSort>((u.get("sort") as RosterSort) || "guildRank"),
+    direction = $state<RosterDirection>(
+      u.get("direction") === "descending" ? "descending" : "ascending",
+    );
+  let mythicSeason = $state(u.get("mythicSeason") ?? ""),
+    raidTier = $state(u.get("raidTier") ?? ""),
+    raidDifficulty = $state(u.get("raidDifficulty") ?? "");
+  let minRaidProgress = $state<number | null>(Number(u.get("minRaidProgress")) || null),
+    activityAge = $state<number | null>(Number(u.get("activityAge")) || null);
+  let officerStatus = $state(u.get("officerStatus") ?? ""),
+    officerTag = $state(u.get("officerTag") ?? ""),
+    role = $state(u.get("role") ?? ""),
+    groupBy = $state(u.get("groupBy") ?? "none");
+  let classes = $state<string[]>([]),
+    specs = $state<string[]>([]);
   const pageSize = 25;
-  let total = $state(0);
-  let loading = $state(true);
-  let error = $state("");
-  let classes = $state<string[]>([]);
-  let specs = $state<string[]>([]);
   let pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)));
+  const filters = () => ({
+    search,
+    class: klass,
+    spec,
+    minLevel: minLevel ?? undefined,
+    minRating: minRating ?? undefined,
+    stale,
+    mythicSeason,
+    raidTier,
+    raidDifficulty,
+    minRaidProgress: minRaidProgress ?? undefined,
+    activityAge: activityAge ?? undefined,
+    officerStatus,
+    officerTag,
+    role,
+  });
   async function load() {
     loading = true;
+    error = "";
     try {
-      const result = await client.roster(
-        `?${rosterQuery({
-          search,
-          class: klass,
-          spec,
-          minLevel: minLevel ?? undefined,
-          minRating: minRating ?? undefined,
-          stale,
-          page,
-          pageSize,
-          sort,
-          direction,
-        })}`,
+      const r = await client.roster(
+        `?${rosterQuery({ ...filters(), page, pageSize, sort, direction })}`,
       );
-      rows = result.items;
-      total = result.total;
-      classes = result.classes;
-      specs = result.specs;
+      rows = r.items;
+      total = r.total;
+      classes = r.classes;
+      specs = r.specs;
     } catch (e) {
       error = e instanceof Error ? e.message : "Roster unavailable";
     } finally {
       loading = false;
     }
   }
-  // Typing should not reload per keystroke; one quiet 300ms window schedules a
-  // single reload, and teardown cancels anything still pending.
+  function update() {
+    const q = new URLSearchParams(rosterQuery({ ...filters(), page, pageSize, sort, direction }));
+    if (groupBy !== "none") q.set("groupBy", groupBy);
+    history.pushState({}, "", `/roster?${q}`);
+    load();
+  }
   const searchChanged = debounce(() => {
     page = 1;
     update();
   }, 300);
-  onMount(() => {
-    load();
-    return () => searchChanged.cancel();
-  });
-  function update() {
-    const q = new URLSearchParams();
-    if (search) q.set("search", search);
-    if (klass) q.set("class", klass);
-    if (spec) q.set("spec", spec);
-    if (minLevel) q.set("minLevel", String(minLevel));
-    if (minRating !== null) q.set("minRating", String(minRating));
-    if (stale) q.set("stale", "true");
-    if (page > 1) q.set("page", String(page));
-    if (sort !== "guildRank") q.set("sort", sort);
-    if (direction !== "ascending") q.set("direction", direction);
-    history.replaceState({}, "", `/roster?${q}`);
-    load();
+  function changeFilter() {
+    page = 1;
+    update();
   }
   function changeSort(column: RosterSort) {
     direction = sort === column && direction === "ascending" ? "descending" : "ascending";
@@ -86,6 +92,53 @@
     page = 1;
     update();
   }
+  function clearFilters() {
+    search = "";
+    klass = "";
+    spec = "";
+    minLevel = null;
+    minRating = null;
+    stale = false;
+    mythicSeason = "";
+    raidTier = "";
+    raidDifficulty = "";
+    minRaidProgress = null;
+    activityAge = null;
+    officerStatus = "";
+    officerTag = "";
+    role = "";
+    changeFilter();
+  }
+  onMount(() => {
+    load();
+    const restore = () => {
+      const q = read();
+      search = q.get("search") ?? "";
+      klass = q.get("class") ?? "";
+      spec = q.get("spec") ?? "";
+      minLevel = Number(q.get("minLevel")) || null;
+      minRating = Number(q.get("minRating")) || null;
+      stale = q.get("stale") === "true";
+      mythicSeason = q.get("mythicSeason") ?? "";
+      raidTier = q.get("raidTier") ?? "";
+      raidDifficulty = q.get("raidDifficulty") ?? "";
+      minRaidProgress = Number(q.get("minRaidProgress")) || null;
+      activityAge = Number(q.get("activityAge")) || null;
+      officerStatus = q.get("officerStatus") ?? "";
+      officerTag = q.get("officerTag") ?? "";
+      role = q.get("role") ?? "";
+      groupBy = q.get("groupBy") ?? "none";
+      page = Number(q.get("page")) || 1;
+      sort = (q.get("sort") as RosterSort) || "guildRank";
+      direction = q.get("direction") === "descending" ? "descending" : "ascending";
+      load();
+    };
+    addEventListener("popstate", restore);
+    return () => {
+      searchChanged.cancel();
+      removeEventListener("popstate", restore);
+    };
+  });
 </script>
 
 <h1>Roster</h1>
@@ -95,73 +148,96 @@
     placeholder="Search ape…"
     bind:value={search}
     oninput={() => searchChanged()}
-  /><select
-    aria-label="Class"
-    bind:value={klass}
-    onchange={() => {
-      page = 1;
-      update();
-    }}
+  />
+  <select aria-label="Class" bind:value={klass} onchange={changeFilter}
     ><option value="">All classes</option>{#each classes as c}<option>{c}</option>{/each}</select
-  ><select
-    aria-label="Specialization"
-    bind:value={spec}
-    onchange={() => {
-      page = 1;
-      update();
-    }}
+  >
+  <select aria-label="Account role" bind:value={role} onchange={changeFilter}
+    ><option value="">All account roles</option
+    >{#each ["member", "officer", "admin", "superadmin"] as accountRole}<option value={accountRole}
+        >{accountRole}</option
+      >{/each}</select
+  >
+  <select aria-label="Specialization" bind:value={spec} onchange={changeFilter}
     ><option value="">All specs</option>{#each specs as s}<option>{s}</option>{/each}</select
-  ><input
+  >
+  <input
     type="number"
     class="num"
     aria-label="Minimum level"
     min="0"
     bind:value={minLevel}
-    onchange={() => {
-      page = 1;
-      update();
-    }}
-  /><input
+    onchange={changeFilter}
+  />
+  <input
     type="number"
     class="num"
     aria-label="Minimum rating"
     min="0"
     bind:value={minRating}
-    onchange={() => {
-      page = 1;
-      update();
-    }}
-  /><label
-    ><input
-      type="checkbox"
-      bind:checked={stale}
-      onchange={() => {
-        page = 1;
-        update();
-      }}
-    /> Stale only</label
-  ><button
-    onclick={() => {
-      search = "";
-      klass = "";
-      spec = "";
-      minLevel = null;
-      minRating = null;
-      stale = false;
-      update();
-    }}>Clear</button
-  ><a
+    onchange={changeFilter}
+  />
+  <label><input type="checkbox" bind:checked={stale} onchange={changeFilter} /> Stale only</label>
+  <input
+    class="num"
+    aria-label="Mythic+ season"
+    placeholder="M+ season"
+    bind:value={mythicSeason}
+    onchange={changeFilter}
+  />
+  <input
+    class="num"
+    aria-label="Raid tier"
+    placeholder="Raid tier"
+    bind:value={raidTier}
+    onchange={changeFilter}
+  />
+  <input
+    class="num"
+    aria-label="Raid difficulty"
+    placeholder="Difficulty"
+    bind:value={raidDifficulty}
+    onchange={changeFilter}
+  />
+  <input
+    type="number"
+    class="num"
+    aria-label="Minimum raid progress"
+    min="0"
+    bind:value={minRaidProgress}
+    onchange={changeFilter}
+  />
+  <input
+    type="number"
+    class="num"
+    aria-label="Activity age in days"
+    min="0"
+    bind:value={activityAge}
+    onchange={changeFilter}
+  />
+  <select aria-label="Officer status" bind:value={officerStatus} onchange={changeFilter}
+    ><option value="">All officer statuses</option
+    >{#each ["applicant", "trial", "active", "inactive", "retired"] as status}<option value={status}
+        >{status}</option
+      >{/each}</select
+  >
+  <input
+    class="num"
+    aria-label="Officer tag"
+    placeholder="Officer tag"
+    bind:value={officerTag}
+    onchange={changeFilter}
+  />
+  <select aria-label="Group roster by" bind:value={groupBy} onchange={update}
+    ><option value="none">No grouping</option
+    >{#each ["class", "role", "realm", "guildRank", "activity", "progression"] as mode}<option
+        value={mode}>{mode}</option
+      >{/each}</select
+  >
+  <button onclick={clearFilters}>Clear</button>
+  <a
     class="export"
-    href="/api/roster/export?{rosterExportQuery({
-      search,
-      class: klass,
-      spec,
-      minLevel: minLevel ?? undefined,
-      minRating: minRating ?? undefined,
-      stale,
-      sort,
-      direction,
-    })}"
+    href={`/api/roster/export?${rosterExportQuery({ ...filters(), sort, direction })}`}
     download>Export CSV</a
   >
 </div>
@@ -170,8 +246,11 @@
     role="status"
   >
     Loading roster…
-  </p>{:else}<p class="count">{total} apes found · page {page} of {pageCount}</p>
-  {#if rows.length}<RosterTable {rows} {sort} {direction} onSort={changeSort} />{:else}<p
+  </p>{:else}
+  <p class="count" aria-live="polite">
+    Showing {rows.length} of {total} matching apes · page {page} of {pageCount}
+  </p>
+  {#if rows.length}<RosterTable {rows} {sort} {direction} {groupBy} onSort={changeSort} />{:else}<p
       class="empty"
       role="status"
     >
@@ -184,13 +263,12 @@
         page--;
         update();
       }}>Previous</button
-    >
-    <span>Page {page} of {pageCount}</span>
-    <button
+    ><span>Page {page} of {pageCount}</span><button
       disabled={page === pageCount}
       onclick={() => {
         page++;
         update();
       }}>Next</button
     >
-  </nav>{/if}
+  </nav>
+{/if}

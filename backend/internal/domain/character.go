@@ -24,6 +24,7 @@ type Character struct {
 	BestKeyLevel   int
 	RaceName       string
 	Gender         string
+	Role           string
 	SyncedAt       time.Time
 }
 

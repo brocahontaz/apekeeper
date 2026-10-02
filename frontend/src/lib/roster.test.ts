@@ -41,4 +41,22 @@ describe("rosterExportQuery", () => {
     expect(
       rosterExportQuery({ minRating: 0, sort: "level", direction: "descending" }).toString(),
     ).toBe("sort=level&direction=descending&minRating=0"));
+  it("carries progression, activity, and officer filters", () => {
+    const query = rosterExportQuery({
+      mythicSeason: "season-1",
+      raidTier: "vault",
+      raidDifficulty: "Heroic",
+      minRaidProgress: 5,
+      activityAge: 14,
+      officerStatus: "trial",
+      officerTag: "bench",
+      role: "officer",
+      sort: "name",
+      direction: "ascending",
+    });
+    expect(query.toString()).toContain("mythicSeason=season-1");
+    expect(query.toString()).toContain("minRaidProgress=5");
+    expect(query.toString()).toContain("officerStatus=trial");
+    expect(query.toString()).toContain("role=officer");
+  });
 });

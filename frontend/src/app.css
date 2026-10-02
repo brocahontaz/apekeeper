@@ -341,6 +341,21 @@ small {
 .table-wrap {
   overflow: auto;
 }
+.column-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.column-picker legend {
+  color: var(--text);
+}
+.roster-cards {
+  display: none;
+}
 .restricted {
   color: var(--muted);
   font-size: 12px;
@@ -538,5 +553,24 @@ progress {
   }
   .grid {
     grid-template-columns: 1fr;
+  }
+  .table-wrap {
+    display: none;
+  }
+  .roster-cards {
+    display: grid;
+    gap: 8px;
+  }
+  .roster-cards .roster-card {
+    display: grid;
+    gap: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 12px;
+    cursor: pointer;
+  }
+  .roster-cards .roster-card span {
+    color: var(--muted);
+    font-size: 11px;
   }
 }
