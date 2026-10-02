@@ -9,6 +9,7 @@
   import Roster from "$routes/Roster.svelte";
   import CharacterDetail from "$routes/CharacterDetail.svelte";
   import Sync from "$routes/Sync.svelte";
+  import Officer from "$routes/Officer.svelte";
   import Login from "$routes/Login.svelte";
   import NotFound from "$routes/NotFound.svelte";
   const routes: Route[] = [
@@ -16,6 +17,7 @@
     { path: "/roster", component: Roster },
     { path: "/characters/{name}", component: CharacterDetail },
     { path: "/sync", component: Sync },
+    { path: "/officer", component: Officer },
     { path: "/login", component: Login },
   ];
   let tick = $state(0);
@@ -48,7 +50,9 @@
     <aside>
       <a href="/" class="brand"><Logo /><span>APEKEEPER<small>Ape Enclosure</small></span></a>
       <nav>
-        <a href="/">The Enclosure</a><a href="/roster">Roster</a><a href="/sync">Keeper Controls</a>
+        <a href="/">The Enclosure</a><a href="/roster">Roster</a><a href="/officer"
+          >Officer workflow</a
+        ><a href="/sync">Keeper Controls</a>
       </nav>
     </aside>
     <main>
@@ -73,6 +77,7 @@
       {#if active?.route.path === "/"}<Dashboard
         />{:else if active?.route.path === "/roster"}<Roster
         />{:else if active?.route.path === "/sync"}<Sync
+        />{:else if active?.route.path === "/officer"}<Officer
         />{:else if active?.route.path === "/characters/{name}"}<CharacterDetail
           name={active.params.name}
         />{:else}<NotFound />{/if}

@@ -686,6 +686,75 @@ func TestSyncOperationEndpointsRequireAdmin(t *testing.T) {
 	assertStatus(t, New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Operations: fakeOperations{cancelErr: errors.New("none")}}), http.MethodPost, "/api/sync/cancel", admin, http.StatusConflict)
 }
 
+func TestOfficerEndpointsAuthorizeRolesAndScopeMetadata(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testdb.New(t)
+	stores := store.New(pool)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "officer-api", Name: "A", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "officer-api-other", Name: "B", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	character := seedCharacter(t, ctx, stores, guild.ID, "Officer", "Mage", "Arcane", time.Now())
+	outsider := seedCharacter(t, ctx, stores, other.ID, "Other", "Mage", "Arcane", time.Now())
+	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
+	member := seedSession(t, ctx, pool, stores, "officer-member", "member")
+	officer := seedSession(t, ctx, pool, stores, "officer-user", "officer")
+	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug})
+	for _, path := range []string{"/api/officer/queue", "/api/officer/activity", "/api/officer/characters/" + intString(character.ID)} {
+		assertStatus(t, h, http.MethodGet, path, "", http.StatusUnauthorized)
+		assertStatus(t, h, http.MethodGet, path, member, http.StatusForbidden)
+		assertStatus(t, h, http.MethodGet, path, officer, http.StatusOK)
+	}
+	assertStatus(t, h, http.MethodGet, "/api/officer/characters/"+intString(outsider.ID), officer, http.StatusNotFound)
+	for _, endpoint := range []struct{ method, path string }{
+		{http.MethodPost, "/api/officer/queue/complete"},
+		{http.MethodPost, "/api/officer/bulk-tags"},
+		{http.MethodPut, "/api/officer/characters/" + intString(character.ID)},
+	} {
+		assertStatus(t, h, endpoint.method, endpoint.path, member, http.StatusForbidden)
+	}
+}
+
+func TestOfficerBulkValidationReportsAllInvalidTargets(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testdb.New(t)
+	stores := store.New(pool)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "officer-bulk", Name: "A", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "officer-bulk-other", Name: "B", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	character := seedCharacter(t, ctx, stores, guild.ID, "Bulk", "Mage", "Arcane", time.Now())
+	outsider := seedCharacter(t, ctx, stores, other.ID, "Outsider", "Mage", "Arcane", time.Now())
+	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
+	officer := seedSession(t, ctx, pool, stores, "bulk-officer", "officer")
+	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug})
+	body, err := json.Marshal(map[string]any{"characterIds": []int64{character.ID, outsider.ID, 999999}, "addTags": []string{"reviewed"}, "confirm": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := requestJSON(h, http.MethodPost, "/api/officer/bulk-tags", officer, body)
+	if r.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	result := decodeBody(t, r).(map[string]any)
+	details := result["details"].(map[string]any)
+	if result["error"] != "invalid bulk targets" || details["invalidCharacterIds"].([]any)[0] != float64(999999) || details["crossGuildCharacterIds"].([]any)[0] != float64(outsider.ID) {
+		t.Fatalf("bulk validation=%v", result)
+	}
+	metadata, err := stores.Officer.Character(ctx, guild.ID, character.ID)
+	if err != nil || len(metadata.Tags) != 0 {
+		t.Fatalf("partial bulk mutation=%+v err=%v", metadata, err)
+	}
+}
+
 func seedCharacter(
 	t *testing.T,
 	ctx context.Context,
@@ -738,6 +807,17 @@ func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores s
 
 func request(h http.Handler, method, path, cookie string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, nil)
+	if cookie != "" {
+		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: cookie})
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func requestJSON(h http.Handler, method, path, cookie string, body []byte) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(string(body)))
+	r.Header.Set("Content-Type", "application/json")
 	if cookie != "" {
 		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: cookie})
 	}

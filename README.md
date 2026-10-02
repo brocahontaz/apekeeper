@@ -68,6 +68,10 @@ Officers can poll `GET /api/sync/progress` and `GET /api/sync/runs` for a live, 
 
 The roster page exports the roster as a CSV download (Export CSV link) matching the current view: the active filters and sort ordering apply to the export, so what you see is what you get. The header toggle switches between light and dark themes; the choice is stored per browser and otherwise follows the system preference.
 
+## Officer workflow
+
+Officers, admins, and superadmins can use **Officer workflow** for guild-scoped review only; members cannot access its API or UI. It keeps local officer notes (with the persisted author identity), normalized tags, and optional lifecycle statuses (`applicant`, `trial`, `active`, `inactive`, `retired`) separate from Blizzard-synced character fields. Notes are capped at 2,000 characters; tags are lower-case ASCII names matching `[a-z0-9][a-z0-9_-]{0,31}`, with at most 20 tags; confirmed bulk tag and review operations are transactional and limited to 100 distinct targets. The deterministic queue lists stale characters, recent failed sync runs (with durable run identifiers that can be marked reviewed), characters without progression snapshots, and changes after the last officer review. Invalid or cross-guild bulk targets are returned as structured details and no requested target is changed. Activity records actor, action, target, timestamp, and safe metadata only: note contents and credentials are never recorded.
+
 A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETENTION_DAYS` (default 90) and expired sessions.
 
 ## Historical progression

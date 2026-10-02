@@ -90,6 +90,13 @@ func New(a API) http.Handler {
 	m.Handle("POST /api/sync/dry-run", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.dryRun)))
 	m.Handle("POST /api/sync/runs/{id}/retry", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.retrySync)))
 	m.Handle("POST /api/sync/cancel", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.cancelSync)))
+	officer := []string{"superadmin", "admin", "officer"}
+	m.Handle("GET /api/officer/queue", a.requireRole(officer, http.HandlerFunc(a.officerQueue)))
+	m.Handle("POST /api/officer/queue/complete", a.requireRole(officer, http.HandlerFunc(a.officerComplete)))
+	m.Handle("POST /api/officer/bulk-tags", a.requireRole(officer, http.HandlerFunc(a.officerBulkTags)))
+	m.Handle("GET /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacterMetadata)))
+	m.Handle("PUT /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacter)))
+	m.Handle("GET /api/officer/activity", a.requireRole(officer, http.HandlerFunc(a.officerActivity)))
 	return spa(m, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
@@ -651,4 +658,159 @@ func (a API) operationResult(w http.ResponseWriter, run store.SyncRun, e error) 
 		return
 	}
 	jsonOut(w, 202, map[string]any{"runId": run.ID})
+}
+
+// Officer workflow limits are deliberately small: a note is capped at 2,000
+// characters, tags are normalized lower-case labels matching
+// [a-z0-9][a-z0-9_-]{0,31} (32 characters, 20 per
+// character), and every transactional bulk request is capped at 100 IDs.
+func decodeOfficerRequest(r *http.Request, v any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(v)
+}
+func (a API) officerQueue(w http.ResponseWriter, r *http.Request) {
+	g, err := a.guild(r.Context())
+	if err != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	items, err := a.Stores.Officer.Queue(r.Context(), g.ID, r.URL.Query().Get("reason"), a.now())
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	jsonOut(w, 200, map[string]any{"items": items})
+}
+func officerIDs(ids []int64) bool {
+	if len(ids) == 0 || len(ids) > domain.OfficerBatchMax {
+		return false
+	}
+	seen := map[int64]bool{}
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+func (a API) officerBulkTags(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		CharacterIDs []int64  `json:"characterIds"`
+		AddTags      []string `json:"addTags"`
+		RemoveTags   []string `json:"removeTags"`
+		Confirm      bool     `json:"confirm"`
+	}
+	if err := decodeOfficerRequest(r, &in); err != nil || !in.Confirm || !officerIDs(in.CharacterIDs) {
+		fail(w, 400, "invalid confirmed bulk tag request")
+		return
+	}
+	g, e := a.guild(r.Context())
+	if e != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	u := r.Context().Value(contextKey{}).(domain.User)
+	if e = a.Stores.Officer.BulkTags(r.Context(), g.ID, u.ID, in.CharacterIDs, in.AddTags, in.RemoveTags); e != nil {
+		officerBulkError(w, e)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"updated": len(in.CharacterIDs)})
+}
+func (a API) officerComplete(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		CharacterIDs []int64 `json:"characterIds"`
+		SyncRunIDs   []int64 `json:"syncRunIds"`
+		Confirm      bool    `json:"confirm"`
+	}
+	if e := decodeOfficerRequest(r, &in); e != nil || !in.Confirm || !officerCompletionIDs(in.CharacterIDs, in.SyncRunIDs) {
+		fail(w, 400, "invalid confirmed review request")
+		return
+	}
+	g, e := a.guild(r.Context())
+	if e != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	u := r.Context().Value(contextKey{}).(domain.User)
+	if e = a.Stores.Officer.Complete(r.Context(), g.ID, u.ID, in.CharacterIDs, in.SyncRunIDs); e != nil {
+		officerBulkError(w, e)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"completed": len(in.CharacterIDs) + len(in.SyncRunIDs)})
+}
+func officerCompletionIDs(characterIDs, syncRunIDs []int64) bool {
+	return len(characterIDs)+len(syncRunIDs) <= domain.OfficerBatchMax && (len(characterIDs) > 0 || len(syncRunIDs) > 0) && (len(characterIDs) == 0 || officerIDs(characterIDs)) && (len(syncRunIDs) == 0 || officerIDs(syncRunIDs))
+}
+func officerBulkError(w http.ResponseWriter, err error) {
+	var validation *domain.BulkValidationError
+	if errors.As(err, &validation) {
+		jsonOut(w, http.StatusBadRequest, map[string]any{"error": validation.Error(), "details": validation})
+		return
+	}
+	fail(w, http.StatusBadRequest, err.Error())
+}
+func (a API) officerActivity(w http.ResponseWriter, r *http.Request) {
+	g, e := a.guild(r.Context())
+	if e != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	limit := 50
+	if v, ok := integer(r.URL.Query().Get("limit")); ok && v > 0 && v <= 100 {
+		limit = v
+	}
+	rows, e := a.Stores.Officer.Activity(r.Context(), g.ID, limit)
+	if e != nil {
+		fail(w, 500, "activity lookup failed")
+		return
+	}
+	jsonOut(w, 200, rows)
+}
+func (a API) officerCharacter(w http.ResponseWriter, r *http.Request) {
+	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if e != nil || id <= 0 {
+		fail(w, 400, "invalid character id")
+		return
+	}
+	var in struct {
+		Note            string   `json:"note"`
+		LifecycleStatus string   `json:"lifecycleStatus"`
+		Tags            []string `json:"tags"`
+	}
+	if e = decodeOfficerRequest(r, &in); e != nil {
+		fail(w, 400, "invalid officer character request")
+		return
+	}
+	g, e := a.guild(r.Context())
+	if e != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	u := r.Context().Value(contextKey{}).(domain.User)
+	if e = a.Stores.Officer.Update(r.Context(), g.ID, u.ID, id, in.Note, in.LifecycleStatus, in.Tags); e != nil {
+		fail(w, 400, e.Error())
+		return
+	}
+	jsonOut(w, 200, map[string]bool{"updated": true})
+}
+
+func (a API) officerCharacterMetadata(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(w, 400, "invalid character id")
+		return
+	}
+	g, err := a.guild(r.Context())
+	if err != nil {
+		fail(w, 500, "guild lookup failed")
+		return
+	}
+	character, err := a.Stores.Officer.Character(r.Context(), g.ID, id)
+	if err != nil {
+		fail(w, 404, "character not found")
+		return
+	}
+	jsonOut(w, 200, character)
 }
