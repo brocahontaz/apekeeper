@@ -4,8 +4,10 @@
 </script>
 
 <button
+  type="button"
   onclick={toggleTheme}
   aria-pressed={dark}
   aria-label="Toggle dark mode"
-  title="Toggle dark mode">{dark ? "☀" : "☾"}</button
+  title={dark ? "Dark mode (switch to light)" : "Light mode (switch to dark)"}
+  >{dark ? "☀" : "☾"}</button
 >

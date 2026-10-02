@@ -38,6 +38,7 @@
   let classes = $state<string[]>([]),
     specs = $state<string[]>([]);
   const pageSize = 25;
+  let generation = 0;
   let pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)));
   const filters = () => ({
     search,
@@ -56,20 +57,22 @@
     role,
   });
   async function load() {
+    const request = ++generation;
     loading = true;
     error = "";
     try {
       const r = await client.roster(
         `?${rosterQuery({ ...filters(), page, pageSize, sort, direction })}`,
       );
+      if (request !== generation) return;
       rows = r.items;
       total = r.total;
       classes = r.classes;
       specs = r.specs;
     } catch (e) {
-      error = e instanceof Error ? e.message : "Roster unavailable";
+      if (request === generation) error = e instanceof Error ? e.message : "Roster unavailable";
     } finally {
-      loading = false;
+      if (request === generation) loading = false;
     }
   }
   function update() {
@@ -136,6 +139,7 @@
     addEventListener("popstate", restore);
     return () => {
       searchChanged.cancel();
+      generation++;
       removeEventListener("popstate", restore);
     };
   });
@@ -241,12 +245,14 @@
     download>Export CSV</a
   >
 </div>
-{#if error}<p class="error" role="status">{error}</p>{:else if loading}<p
-    class="skeleton"
-    role="status"
-  >
+{#if error}<section class="error-state" role="alert" aria-live="assertive">
+    <p class="error">{error}</p>
+    <button onclick={load}>Retry roster request</button>
+  </section>{/if}
+{#if loading && !rows.length && !error}<p class="skeleton" role="status">
     Loading roster…
-  </p>{:else}
+  </p>{:else if rows.length || !error}
+  {#if loading}<p class="refreshing" role="status" aria-live="polite">Refreshing roster…</p>{/if}
   <p class="count" aria-live="polite">
     Showing {rows.length} of {total} matching apes · page {page} of {pageCount}
   </p>

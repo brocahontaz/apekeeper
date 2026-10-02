@@ -27,9 +27,30 @@
     { id: number; slug: string; name: string; realm: string; region: string; role: string }[]
   >([]);
   let selectedGuild = $state("");
+  let confirmedGuild = $state("");
+  let guildSwitching = $state(false);
+  let bootstrapLoading = $state(true);
+  let actionError = $state("");
+  let routeAnnouncement = $state("");
+  let mainElement = $state<HTMLElement | null>(null);
   let active = $derived.by(() => {
     tick;
     return match(routes);
+  });
+  const routeLabel = (path: string) =>
+    ({
+      "/": "The Enclosure",
+      "/roster": "Roster",
+      "/sync": "Keeper Controls",
+      "/officer": "Officer workflow",
+      "/members": "Memberships",
+      "/characters/{name}": "Character detail",
+    })[path] ?? "Page";
+  $effect(() => {
+    const path = active?.route.path;
+    if (!path || bootstrapLoading || path === "/login") return;
+    routeAnnouncement = `${routeLabel(path)} loaded`;
+    queueMicrotask(() => mainElement?.focus());
   });
   onMount(() => {
     const listener = () => tick++;
@@ -38,30 +59,57 @@
       .me()
       .then((u) => {
         currentUser.set(u);
-        client.guilds().then((items) => {
+        return client.guilds().then((items) => {
           guilds = items;
-          selectedGuild = items.find((item) => item.selected)?.slug ?? items[0]?.slug ?? "";
+          confirmedGuild = items.find((item) => item.selected)?.slug ?? items[0]?.slug ?? "";
+          selectedGuild = confirmedGuild;
         });
+      })
+      .then(() => {
         if (location.pathname === "/login") navigate("/");
       })
       .catch(() => {
         if (location.pathname !== "/login") navigate("/login");
-      });
+      })
+      .finally(() => (bootstrapLoading = false));
     return () => removeEventListener("popstate", listener);
   });
   async function logout() {
-    await client.logout();
-    currentUser.set(null);
-    navigate("/login");
+    actionError = "";
+    try {
+      await client.logout();
+      currentUser.set(null);
+      navigate("/login");
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : "Could not log out. Please try again.";
+    }
   }
   async function switchGuild() {
     if (!selectedGuild) return;
-    await client.selectGuild(selectedGuild);
-    location.reload();
+    if (selectedGuild === confirmedGuild) return;
+    actionError = "";
+    guildSwitching = true;
+    const requestedGuild = selectedGuild;
+    try {
+      await client.selectGuild(requestedGuild);
+      confirmedGuild = requestedGuild;
+      location.reload();
+    } catch (error) {
+      selectedGuild = confirmedGuild;
+      actionError =
+        error instanceof Error ? error.message : "Could not switch guild. Please try again.";
+    } finally {
+      guildSwitching = false;
+    }
   }
 </script>
 
-{#if active?.route.path === "/login"}<Login />{:else}<div class="shell">
+{#if active?.route.path === "/login"}<Login />{:else if bootstrapLoading}<main
+    class="login"
+    aria-live="polite"
+  >
+    <p class="skeleton" role="status">Opening expedition ledger…</p>
+  </main>{:else}<div class="shell">
     <aside>
       <a href="/" class="brand"><Logo /><span>APEKEEPER<small>Ape Enclosure</small></span></a>
       <nav>
@@ -70,13 +118,15 @@
         ><a href="/sync">Keeper Controls</a><a href="/members">Memberships</a>
       </nav>
     </aside>
-    <main>
+    <main bind:this={mainElement} tabindex="-1">
+      <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">{routeAnnouncement}</p>
       <header class="topbar">
         <span>EXPEDITION LOG / {new Date().toLocaleDateString()}</span>
         <span class="topbar-actions">
           {#if $currentUser}<span
               >{#if guilds.length > 1}<select
                   bind:value={selectedGuild}
+                  disabled={guildSwitching}
                   onchange={switchGuild}
                   aria-label="Current guild"
                   >{#each guilds as guild}<option value={guild.slug}>{guild.name}</option
@@ -96,6 +146,7 @@
           <ThemeToggle />
         </span>
       </header>
+      {#if actionError}<p class="error-state" role="alert">{actionError}</p>{/if}
       {#if active?.route.path === "/"}<Dashboard
         />{:else if active?.route.path === "/roster"}<Roster
         />{:else if active?.route.path === "/sync"}<Sync

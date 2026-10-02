@@ -103,6 +103,9 @@ describe("Sync live progress", () => {
     expect(runsCalls).toBe(2);
     expect(host.textContent).not.toContain("Expedition in progress");
     expect(host.textContent).toContain("success");
+    expect(host.querySelector('[role="status"]')?.textContent).toContain(
+      "Sync completed successfully.",
+    );
 
     await vi.advanceTimersByTimeAsync(4500);
     expect(progressCalls).toBe(2);

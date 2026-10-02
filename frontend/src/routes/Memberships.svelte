@@ -1,6 +1,7 @@
 <script lang="ts">
   import { client, type GuildMember, type MembershipCandidate } from "$lib/api";
   import { currentUser } from "$lib/stores";
+  import { onDestroy } from "svelte";
   let members = $state<GuildMember[]>([]),
     error = $state(""),
     loading = $state(true),
@@ -8,55 +9,96 @@
   let query = $state(""),
     candidates = $state<MembershipCandidate[]>([]),
     role = $state("member");
+  let alive = true;
+  let loadGeneration = 0;
+  let searchGeneration = 0;
+  let mutationGeneration = 0;
+  let mutationVersion = 0;
+  onDestroy(() => {
+    alive = false;
+    loadGeneration++;
+    searchGeneration++;
+    mutationGeneration++;
+    mutationVersion++;
+  });
   async function load() {
+    const generation = ++loadGeneration;
+    const mutation = mutationVersion;
     loading = true;
     error = "";
     try {
       const guilds = await client.guilds();
+      if (!alive || generation !== loadGeneration || mutation !== mutationVersion) return;
       const selected = guilds.find((g) => g.selected) ?? guilds[0];
       canManage =
         $currentUser?.appRole === "superadmin" ||
         selected?.role === "owner" ||
         selected?.role === "admin";
-      if (canManage) members = await client.members();
+      if (canManage) {
+        const nextMembers = await client.members();
+        if (!alive || generation !== loadGeneration || mutation !== mutationVersion) return;
+        members = nextMembers;
+      }
     } catch (e) {
-      error = e instanceof Error ? e.message : "Membership administration unavailable";
+      if (alive && generation === loadGeneration && mutation === mutationVersion)
+        error = e instanceof Error ? e.message : "Membership administration unavailable";
     } finally {
-      loading = false;
+      if (alive && generation === loadGeneration && mutation === mutationVersion) loading = false;
     }
   }
   async function setRole(member: GuildMember, role: string) {
+    const generation = ++mutationGeneration;
     try {
       await client.updateMember(member.id, role);
+      if (!alive || generation !== mutationGeneration) return;
+      mutationVersion++;
       await load();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Membership update failed";
+      if (alive && generation === mutationGeneration)
+        error = e instanceof Error ? e.message : "Membership update failed";
     }
   }
   async function search() {
+    const generation = ++searchGeneration;
+    error = "";
     try {
-      candidates = await client.searchMembers(query);
+      const nextCandidates = await client.searchMembers(query);
+      if (!alive || generation !== searchGeneration) return;
+      candidates = nextCandidates;
     } catch (e) {
-      error = e instanceof Error ? e.message : "Member search failed";
+      if (alive && generation === searchGeneration)
+        error = e instanceof Error ? e.message : "Member search failed";
     }
   }
   async function grant(candidate: MembershipCandidate) {
+    const generation = ++mutationGeneration;
+    const search = searchGeneration;
     try {
       await client.inviteMember(candidate.battletag, role);
-      query = "";
-      candidates = [];
+      if (!alive || generation !== mutationGeneration) return;
+      mutationVersion++;
+      if (search === searchGeneration) {
+        searchGeneration++;
+        query = "";
+        candidates = [];
+      }
       await load();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Membership grant failed";
+      if (alive && generation === mutationGeneration)
+        error = e instanceof Error ? e.message : "Membership grant failed";
     }
   }
   async function remove(member: GuildMember) {
     if (!confirm(`Remove ${member.displayName || member.battletag} from this guild?`)) return;
+    const generation = ++mutationGeneration;
     try {
       await client.removeMember(member.id);
+      if (!alive || generation !== mutationGeneration) return;
+      mutationVersion++;
       await load();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Membership removal failed";
+      if (alive && generation === mutationGeneration)
+        error = e instanceof Error ? e.message : "Membership removal failed";
     }
   }
   $effect(() => {
