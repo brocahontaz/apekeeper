@@ -90,6 +90,30 @@ export type SyncProgress = {
   startedAt: string;
   dryRun: boolean;
 };
+export type OfficerQueueItem = {
+  characterId?: number;
+  syncRunId?: number;
+  name: string;
+  reason: string;
+  tags: string[];
+  syncedAt?: string;
+};
+export type OfficerActivity = {
+  id: number;
+  actor: string;
+  action: string;
+  targetId?: number;
+  createdAt: string;
+  changes: Record<string, unknown>;
+};
+export type OfficerCharacterMetadata = {
+  id: number;
+  note: string;
+  lifecycleStatus: string;
+  tags: string[];
+  reviewedAt?: string;
+  noteAuthor?: string;
+};
 export type Dashboard = {
   rosterSize: number;
   maxLevelMembers: number;
@@ -159,5 +183,29 @@ export const client = {
   dryRun: () => api<{ runId: number }>("/api/sync/dry-run", { method: "POST" }),
   retry: (id: number) => api<{ runId: number }>(`/api/sync/runs/${id}/retry`, { method: "POST" }),
   cancel: () => api<{ cancelled: boolean }>("/api/sync/cancel", { method: "POST" }),
+  officerQueue: (reason = "") =>
+    api<{ items: OfficerQueueItem[] }>(
+      `/api/officer/queue${reason ? `?reason=${encodeURIComponent(reason)}` : ""}`,
+    ),
+  officerActivity: () => api<OfficerActivity[]>("/api/officer/activity"),
+  officerCharacter: (id: number) => api<OfficerCharacterMetadata>(`/api/officer/characters/${id}`),
+  bulkTags: (characterIds: number[], addTags: string[], removeTags: string[]) =>
+    api<{ updated: number }>("/api/officer/bulk-tags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ characterIds, addTags, removeTags, confirm: true }),
+    }),
+  completeReview: (characterIds: number[], syncRunIds: number[]) =>
+    api<{ completed: number }>("/api/officer/queue/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ characterIds, syncRunIds, confirm: true }),
+    }),
+  updateOfficerCharacter: (id: number, note: string, lifecycleStatus: string, tags: string[]) =>
+    api<{ updated: boolean }>(`/api/officer/characters/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note, lifecycleStatus, tags }),
+    }),
   logout: () => api<void>("/api/auth/logout", { method: "POST" }),
 };
