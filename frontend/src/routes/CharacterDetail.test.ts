@@ -74,6 +74,20 @@ describe("CharacterDetail history", () => {
     expect(host.textContent).toContain("unavailable");
   });
 
+  it("restores the roster query from the character link", async () => {
+    window.history.pushState({}, "", "/characters/Alpha?roster=%3Fclass%3DMage%26page%3D2");
+    vi.stubGlobal("fetch", (path: string) =>
+      Promise.resolve(path === "/api/characters/Alpha" ? response(character) : response(history)),
+    );
+    host = document.createElement("div");
+    document.body.append(host);
+    component = mount(CharacterDetail, { target: host, props: { name: "Alpha" } });
+
+    await vi.waitFor(() =>
+      expect(host.querySelector('a[href="/roster?class=Mage&page=2"]')).not.toBeNull(),
+    );
+  });
+
   it("skips malformed history entries without breaking the snapshot table", async () => {
     vi.stubGlobal("fetch", (path: string) =>
       Promise.resolve(

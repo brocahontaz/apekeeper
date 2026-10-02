@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -53,6 +54,60 @@ func TestSPAFallbackDoesNotInterceptAPI(t *testing.T) {
 	if api.Code != http.StatusOK {
 		t.Fatalf("api=%d", api.Code)
 	}
+}
+
+func TestParseRosterQueryRejectsAmbiguousAndNonFiniteValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    string
+		want string
+	}{
+		{"contradictory season aliases", "mythicSeason=one&season=two", `contradictory roster parameters "mythicSeason" and "season"`},
+		{"contradictory progress aliases", "minRaidProgress=4&raidProgress=5", `contradictory roster parameters "minRaidProgress" and "raidProgress"`},
+		{"contradictory activity aliases", "activityAge=4&activityAgeDays=5", `contradictory roster parameters "activityAge" and "activityAgeDays"`},
+		{"infinite rating", "minRating=Inf", "invalid minimum rating"},
+		{"nan rating", "minRating=NaN", "invalid minimum rating"},
+		{"invalid account role", "role=president", "invalid roster role"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := parseRosterQuery(mustValues(t, tc.q), time.Now(), store.CharacterSortName)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, aliases := range []string{"mythicSeason=one&season=one", "activityAge=7&activityAgeDays=7"} {
+		if _, _, _, err := parseRosterQuery(mustValues(t, aliases), time.Now(), store.CharacterSortName); err != nil {
+			t.Fatalf("equal aliases rejected (%s): %v", aliases, err)
+		}
+	}
+}
+
+func TestParseRosterQueryRejectsUnsafeRosterFilterBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    url.Values
+	}{
+		{"negative rank", url.Values{"rank": {"-1"}}},
+		{"long search", url.Values{"search": {strings.Repeat("a", 121)}}},
+		{"long class", url.Values{"class": {strings.Repeat("a", 81)}}},
+		{"long spec", url.Values{"spec": {strings.Repeat("a", 81)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, err := parseRosterQuery(tc.q, time.Now(), store.CharacterSortName); err == nil {
+				t.Fatal("unsafe roster filter accepted")
+			}
+		})
+	}
+}
+
+func mustValues(t *testing.T, raw string) url.Values {
+	t.Helper()
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return q
 }
 
 func TestSPAFallbackUsesStaticDir(t *testing.T) {
@@ -180,6 +235,11 @@ func TestStoreBackedHandlers(t *testing.T) {
 	member := seedSession(t, ctx, pool, stores, "member", "member")
 	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
 	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin")
+	for name, user := range map[string]string{"Alpha": "admin", "Beta": "officer"} {
+		if _, err := pool.Exec(ctx, `UPDATE characters SET user_id=(SELECT id FROM users WHERE display_name=$1) WHERE guild_id=$2 AND display_name=$3`, user, guild.ID, name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	h := New(API{
 		Stores:    stores,
 		Auth:      manager,
@@ -288,6 +348,11 @@ func TestStoreBackedHandlers(t *testing.T) {
 				t.Fatalf("csv row %d=%q, want it to start with %s", i+1, lines[i+1], want)
 			}
 		}
+		filtered := request(h, http.MethodGet, "/api/roster/export?role=officer&sort=name", member)
+		filteredLines := strings.Split(strings.TrimSuffix(filtered.Body.String(), "\n"), "\n")
+		if filtered.Code != http.StatusOK || len(filteredLines) != 2 || !strings.HasPrefix(filteredLines[1], "Beta,") {
+			t.Fatalf("filtered csv status=%d body=%s", filtered.Code, filtered.Body.String())
+		}
 	})
 	t.Run("roster filters", func(t *testing.T) {
 		for _, path := range []string{"/api/roster?search=lph", "/api/roster?class=Mage"} {
@@ -326,11 +391,42 @@ func TestStoreBackedHandlers(t *testing.T) {
 				t.Fatalf("path=%s roster=%v", path, body)
 			}
 		}
+		role := request(h, http.MethodGet, "/api/roster?role=officer&class=Rogue", member)
+		roleBody := decodeBody(t, role).(map[string]any)
+		if role.Code != http.StatusOK || roleBody["total"] != float64(1) || roleBody["items"].([]any)[0].(map[string]any)["name"] != "Beta" || roleBody["items"].([]any)[0].(map[string]any)["role"] != "officer" {
+			t.Fatalf("role roster=%v", roleBody)
+		}
+		assertStatus(t, h, http.MethodGet, "/api/roster?role=president", member, http.StatusBadRequest)
+		emptyRole := request(h, http.MethodGet, "/api/roster?role=superadmin", member)
+		if emptyRole.Code != http.StatusOK || emptyRole.Body.String() == "" || decodeBody(t, emptyRole).(map[string]any)["total"] != float64(0) {
+			t.Fatalf("empty role roster=%d %s", emptyRole.Code, emptyRole.Body.String())
+		}
 		r = request(h, http.MethodGet, "/api/roster?minLevel=70", member)
 		body = decodeBody(t, r).(map[string]any)
 		if body["total"] != float64(3) || len(body["items"].([]any)) != 3 {
 			t.Fatalf("minLevel roster=%v", body)
 		}
+		if err := stores.Progression.ReplaceRaids(ctx, alpha.ID, []domain.RaidProgression{
+			{CharacterID: alpha.ID, RaidSlug: "raid", RaidName: "Raid", Difficulty: "heroic", Progress: 4, TotalBosses: 8, Summary: []byte("{}"), SyncedAt: now},
+			{CharacterID: alpha.ID, RaidSlug: "raid", RaidName: "Raid", Difficulty: "normal", Progress: 8, TotalBosses: 8, Summary: []byte("{}"), SyncedAt: now},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// All raid predicates must describe the same progression row. A
+		// character with heroic progress 4 and normal progress 8 must not
+		// satisfy heroic + minimum progress 8 by combining two EXISTS clauses.
+		crossRow := request(h, http.MethodGet, "/api/roster?raidTier=raid&raidDifficulty=heroic&minRaidProgress=8", member)
+		crossBody := decodeBody(t, crossRow).(map[string]any)
+		if crossRow.Code != http.StatusOK || crossBody["total"] != float64(0) || len(crossBody["items"].([]any)) != 0 {
+			t.Fatalf("cross-row raid match=%v", crossBody)
+		}
+		sameRow := request(h, http.MethodGet, "/api/roster?raid=Raid&raidDifficulty=heroic&raidProgress=4", member)
+		sameBody := decodeBody(t, sameRow).(map[string]any)
+		if sameRow.Code != http.StatusOK || sameBody["total"] != float64(1) || sameBody["items"].([]any)[0].(map[string]any)["name"] != "Alpha" {
+			t.Fatalf("same-row raid match=%v", sameBody)
+		}
+		assertStatus(t, h, http.MethodGet, "/api/roster?activityAge=4&activityAgeDays=5", member, http.StatusBadRequest)
+		assertStatus(t, h, http.MethodGet, "/api/roster?page="+strconv.FormatInt(int64(^uint(0)>>1), 10)+"&pageSize=100", member, http.StatusBadRequest)
 		assertStatus(t, h, http.MethodGet, "/api/roster?sort=drop%20table", member, http.StatusBadRequest)
 	})
 	t.Run("character detail and unknown character", func(t *testing.T) {
@@ -752,6 +848,106 @@ func TestOfficerBulkValidationReportsAllInvalidTargets(t *testing.T) {
 	metadata, err := stores.Officer.Character(ctx, guild.ID, character.ID)
 	if err != nil || len(metadata.Tags) != 0 {
 		t.Fatalf("partial bulk mutation=%+v err=%v", metadata, err)
+	}
+}
+
+func TestRosterResultsCoverProgressionOfficerFiltersPaginationAndExport(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	stores := store.New(p)
+	now := time.Now().Truncate(time.Second)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "roster-results", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type seeded struct {
+		name, class, spec, role string
+		when                    time.Time
+	}
+	seed := []seeded{
+		{"Alpha", "Mage", "Arcane", "officer", now},
+		{"Bravo", "Rogue", "Combat", "member", now.Add(-10 * 24 * time.Hour)},
+		{"Charlie", "Mage", "Fire", "admin", now},
+		{"Delta", "Warrior", "Arms", "member", now.Add(-20 * 24 * time.Hour)},
+	}
+	chars := make(map[string]domain.Character, len(seed))
+	for _, row := range seed {
+		c := seedCharacter(t, ctx, stores, guild.ID, row.name, row.class, row.spec, row.when)
+		chars[row.name] = c
+		if _, err := stores.Users.UpsertBattleNetUser(ctx, row.name, row.name, "", "", now.Add(time.Hour), false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Exec(ctx, `UPDATE users SET app_role=$1 WHERE display_name=$2`, row.role, row.name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Exec(ctx, `UPDATE characters SET user_id=(SELECT id FROM users WHERE display_name=$1) WHERE id=$2`, row.name, c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, m := range []domain.MythicPlus{
+		{CharacterID: chars["Alpha"].ID, SeasonSlug: "s1", OverallRating: 2400, BestKeyLevel: 12, SyncedAt: now},
+		{CharacterID: chars["Alpha"].ID, SeasonSlug: "s2", OverallRating: 1800, BestKeyLevel: 10, SyncedAt: now},
+		{CharacterID: chars["Bravo"].ID, SeasonSlug: "s2", OverallRating: 2600, BestKeyLevel: 15, SyncedAt: now},
+	} {
+		if err := stores.Progression.UpsertMythicPlus(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stores.Progression.ReplaceRaids(ctx, chars["Alpha"].ID, []domain.RaidProgression{{CharacterID: chars["Alpha"].ID, RaidSlug: "vault", RaidName: "Vault", Difficulty: "heroic", Progress: 4, TotalBosses: 8, SyncedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(ctx, `INSERT INTO officer_character_state(character_id,lifecycle_status,tags) VALUES($1,'active',$2)`, chars["Alpha"].ID, []string{"reviewed", "priority"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(ctx, `INSERT INTO officer_character_state(character_id,lifecycle_status,tags) VALUES($1,'trial',$2)`, chars["Bravo"].ID, []string{"priority"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
+	member := seedSession(t, ctx, p, stores, "roster-member", "member")
+	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Now: func() time.Time { return now }})
+	if r := request(h, http.MethodGet, "/api/roster", ""); r.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated roster status=%d", r.Code)
+	}
+	check := func(query string, want ...string) {
+		t.Helper()
+		r := request(h, http.MethodGet, "/api/roster?"+query, member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("query %q status=%d body=%s", query, r.Code, r.Body.String())
+		}
+		items := decodeBody(t, r).(map[string]any)["items"].([]any)
+		if len(items) != len(want) {
+			t.Fatalf("query %q items=%v, want %v", query, items, want)
+		}
+		for i, name := range want {
+			if items[i].(map[string]any)["name"] != name {
+				t.Fatalf("query %q item[%d]=%v, want %s", query, i, items[i], name)
+			}
+		}
+	}
+	check("mythicSeason=s1&minRating=2000", "Alpha")
+	check("mythicSeason=s2&minRating=2000", "Bravo")
+	check("raidTier=vault&raidDifficulty=heroic&minRaidProgress=4", "Alpha")
+	check("activityAge=7", "Alpha", "Charlie")
+	check("officerStatus=active", "Alpha")
+	check("officerTag=priority", "Alpha", "Bravo")
+	check("role=admin", "Charlie")
+	check("class=Mage&mythicSeason=s1&minRating=2000&officerTag=priority", "Alpha")
+	check("role=superadmin")
+	check("sort=name&page=1&pageSize=2", "Alpha", "Bravo")
+	check("sort=name&page=2&pageSize=2", "Charlie", "Delta")
+	check("sort=name&page=1&pageSize=2", "Alpha", "Bravo")
+	r := request(h, http.MethodGet, "/api/roster/export?sort=name", member)
+	if r.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", r.Code, r.Body.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(r.Body.String(), "\n"), "\n")
+	if len(lines) != 5 || !strings.HasPrefix(lines[0], "Name,Realm,Class") {
+		t.Fatalf("export lines=%d body=%q", len(lines), r.Body.String())
+	}
+	for i, name := range []string{"Alpha", "Bravo", "Charlie", "Delta"} {
+		if !strings.HasPrefix(lines[i+1], name+",") {
+			t.Fatalf("export row %d=%q, want %s", i+1, lines[i+1], name)
+		}
 	}
 }
 

@@ -6,12 +6,21 @@ export type Filters = {
   stale?: boolean;
   minLevel?: number;
   minRating?: number;
+  mythicSeason?: string;
+  raidTier?: string;
+  raidDifficulty?: string;
+  minRaidProgress?: number;
+  activityAge?: number;
+  officerStatus?: string;
+  officerTag?: string;
+  role?: "member" | "officer" | "admin" | "superadmin" | string;
 };
 export function filterRoster(rows: Character[], f: Filters) {
   return rows.filter(
     (r) =>
       (!f.search || r.name.toLowerCase().includes(f.search.toLowerCase())) &&
       (!f.class || r.className === f.class) &&
+      (!f.role || r.role === f.role) &&
       (!f.stale || r.stale),
   );
 }
@@ -53,6 +62,19 @@ export function rosterQuery(
     query.set("minLevel", String(filters.minLevel));
   if (filters.minRating !== undefined && filters.minRating >= 0)
     query.set("minRating", String(filters.minRating));
+  for (const [key, value] of Object.entries({
+    mythicSeason: filters.mythicSeason,
+    raidTier: filters.raidTier,
+    raidDifficulty: filters.raidDifficulty,
+    officerStatus: filters.officerStatus,
+    officerTag: filters.officerTag,
+    role: filters.role,
+  }))
+    if (value) query.set(key, value);
+  if (filters.minRaidProgress !== undefined && filters.minRaidProgress >= 0)
+    query.set("minRaidProgress", String(filters.minRaidProgress));
+  if (filters.activityAge !== undefined && filters.activityAge >= 0)
+    query.set("activityAge", String(filters.activityAge));
   return query;
 }
 

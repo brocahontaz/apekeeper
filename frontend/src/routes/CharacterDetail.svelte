@@ -74,9 +74,8 @@
   }
 </script>
 
-<a href="/roster">← Roster</a>{#if error}<p class="error">{error}</p>{:else if !character}<p
-    class="skeleton"
-  >
+<a href={`/roster${new URLSearchParams(location.search).get("roster") ?? ""}`}>← Roster</a
+>{#if error}<p class="error">{error}</p>{:else if !character}<p class="skeleton">
     Opening ape file…
   </p>{:else}<header class="character">
     <div class="avatar">

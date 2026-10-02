@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -191,16 +193,83 @@ func parseRosterQuery(q url.Values, staleBefore time.Time, defaultSort store.Cha
 		Name:  q.Get("search"),
 	}
 	if v, ok := integer(q.Get("rank")); ok {
+		if v < 0 {
+			return f, "", false, errors.New("invalid roster rank")
+		}
 		f.Rank = &v
+	} else if q.Get("rank") != "" {
+		return f, "", false, errors.New("invalid roster rank")
 	}
 	if v, ok := integer(q.Get("minLevel")); ok {
+		if v < 0 || v > 100 {
+			return f, "", false, errors.New("invalid minimum level")
+		}
 		f.MinLevel = &v
+	} else if q.Get("minLevel") != "" {
+		return f, "", false, errors.New("invalid minimum level")
 	}
 	if v, e := strconv.ParseFloat(q.Get("minRating"), 64); e == nil && q.Get("minRating") != "" {
+		if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return f, "", false, errors.New("invalid minimum rating")
+		}
 		f.MinRating = &v
+	} else if q.Get("minRating") != "" {
+		return f, "", false, errors.New("invalid minimum rating")
 	}
 	if q.Get("stale") == "true" {
 		f.StaleBefore = &staleBefore
+	} else if q.Get("stale") != "" && q.Get("stale") != "false" {
+		return f, "", false, errors.New("invalid stale filter")
+	}
+	var aliasErr error
+	if f.MythicSeason, aliasErr = rosterAlias(q, "mythicSeason", "season"); aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	if f.RaidTier, aliasErr = rosterAlias(q, "raidTier", "raid"); aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	f.RaidDifficulty = q.Get("raidDifficulty")
+	f.Role = q.Get("role")
+	if f.OfficerStatus, aliasErr = rosterAlias(q, "officerStatus", "status"); aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	if f.OfficerTag, aliasErr = rosterAlias(q, "officerTag", "tag"); aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	if len(f.Name) > 120 || len(f.Class) > 80 || len(f.Spec) > 80 || len(f.MythicSeason) > 80 || len(f.RaidTier) > 120 || len(f.RaidDifficulty) > 40 || len(f.OfficerStatus) > 20 || len(f.OfficerTag) > 32 || len(f.Role) > 20 {
+		return f, "", false, errors.New("roster filter is too long")
+	}
+	if f.Role != "" && !map[string]bool{"member": true, "officer": true, "admin": true, "superadmin": true}[f.Role] {
+		return f, "", false, errors.New("invalid roster role")
+	}
+	if f.OfficerStatus != "" && !domain.LifecycleStatuses[f.OfficerStatus] {
+		return f, "", false, errors.New("invalid officer status")
+	}
+	if f.RaidDifficulty == "" && q.Get("raidDifficulty") != "" {
+		return f, "", false, errors.New("invalid raid difficulty")
+	}
+	progress, aliasErr := rosterAlias(q, "minRaidProgress", "raidProgress")
+	if aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	if v, ok := integer(progress); ok {
+		if v < 0 {
+			return f, "", false, errors.New("invalid raid progress")
+		}
+		f.MinRaidProgress = &v
+	} else if progress != "" {
+		return f, "", false, errors.New("invalid raid progress")
+	}
+	age, aliasErr := rosterAlias(q, "activityAge", "activityAgeDays")
+	if aliasErr != nil {
+		return f, "", false, aliasErr
+	}
+	if age != "" {
+		v, ok := integer(age)
+		if !ok || v < 0 || v > 3650 {
+			return f, "", false, errors.New("invalid activity age")
+		}
+		f.MaxAge = ptrDuration(time.Duration(v) * 24 * time.Hour)
 	}
 	sort, ok := store.ParseCharacterSort(q.Get("sort"))
 	if q.Get("sort") == "" {
@@ -215,6 +284,20 @@ func parseRosterQuery(q url.Values, staleBefore time.Time, defaultSort store.Cha
 	}
 	return f, sort, descending, nil
 }
+func first(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+func rosterAlias(q url.Values, canonical, alias string) (string, error) {
+	a, b := q.Get(canonical), q.Get(alias)
+	if a != "" && b != "" && a != b {
+		return "", fmt.Errorf("contradictory roster parameters %q and %q", canonical, alias)
+	}
+	return first(a, b), nil
+}
+func ptrDuration(v time.Duration) *time.Duration { return &v }
 
 func (a API) roster(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
@@ -229,11 +312,25 @@ func (a API) roster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, pageSize := 1, 25
-	if v, ok := integer(q.Get("page")); ok && v > 0 {
+	if q.Get("page") != "" {
+		v, ok := integer(q.Get("page"))
+		if !ok || v < 1 {
+			fail(w, 400, "invalid roster page")
+			return
+		}
 		page = v
 	}
-	if v, ok := integer(q.Get("pageSize")); ok && v > 0 && v <= 100 {
+	if q.Get("pageSize") != "" {
+		v, ok := integer(q.Get("pageSize"))
+		if !ok || v < 1 || v > 100 {
+			fail(w, 400, "invalid roster page size")
+			return
+		}
 		pageSize = v
+	}
+	if page-1 > int(^uint(0)>>1)/pageSize {
+		fail(w, 400, "roster page is too large")
+		return
 	}
 	result, e := a.Stores.Characters.ListPageByGuild(r.Context(), g.ID, f, pageSize, (page-1)*pageSize, sort, descending)
 	if e != nil {
@@ -269,6 +366,7 @@ func characterJSON(c domain.Character, now time.Time) map[string]any {
 		"className":    c.ClassName,
 		"specId":       c.SpecID,
 		"specName":     c.SpecName,
+		"role":         c.Role,
 		"level":        c.Level,
 		"itemLevel":    c.ItemLevel,
 		"guildRank":    c.GuildRank,

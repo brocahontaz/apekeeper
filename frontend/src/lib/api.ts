@@ -14,6 +14,7 @@ export type Character = {
   className: string;
   specId: number;
   specName: string;
+  role?: string;
   level: number;
   itemLevel: number;
   guildRank?: number;
