@@ -6,6 +6,22 @@ export type User = {
   battletag: string;
   appRole: "superadmin" | "admin" | "officer" | "member";
 };
+export type Guild = {
+  id: number;
+  slug: string;
+  name: string;
+  realm: string;
+  region: string;
+  role: string;
+  selected?: boolean;
+};
+export type GuildMember = { id: number; displayName: string; battletag: string; role: string };
+export type MembershipCandidate = {
+  id: number;
+  displayName: string;
+  battletag: string;
+  appRole: string;
+};
 export type Character = {
   id: number;
   name: string;
@@ -174,6 +190,29 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 export const client = {
   me: () => api<User>("/api/auth/me"),
+  guilds: () => api<Guild[]>("/api/guilds"),
+  selectGuild: (slug: string) =>
+    api<{ slug: string }>("/api/guilds/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    }),
+  members: () => api<GuildMember[]>("/api/guild/members"),
+  searchMembers: (q: string) =>
+    api<MembershipCandidate[]>(`/api/guild/members/search?q=${encodeURIComponent(q)}`),
+  inviteMember: (battletag: string, role: string) =>
+    api<{ userId: number; role: string }>("/api/guild/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ battletag, role }),
+    }),
+  updateMember: (id: number, role: string) =>
+    api<void>(`/api/guild/members/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    }),
+  removeMember: (id: number) => api<void>(`/api/guild/members/${id}`, { method: "DELETE" }),
   dashboard: () => api<Dashboard>("/api/dashboard"),
   roster: (q = "") => api<RosterPage>(`/api/roster${q}`),
   character: (name: string) => api<Character>(`/api/characters/${encodeURIComponent(name)}`),

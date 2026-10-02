@@ -8,6 +8,7 @@ type Store struct {
 	Progression ProgressionStore
 	SyncRuns    SyncRunStore
 	Users       UserStore
+	Memberships MembershipStore
 	Officer     OfficerStore
 }
 
@@ -18,6 +19,7 @@ func New(pool *pgxpool.Pool) Store {
 		Progression: ProgressionStore{pool},
 		SyncRuns:    SyncRunStore{pool},
 		Users:       UserStore{pool},
+		Memberships: MembershipStore{pool},
 		Officer:     OfficerStore{pool},
 	}
 }

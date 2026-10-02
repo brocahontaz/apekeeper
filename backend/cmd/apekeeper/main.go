@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,6 +73,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err = stores.Guilds.ApplyLegacyDefaults(ctx, guild.ID, cfg.SyncSchedule, cfg.DiscordWebhookURL); err != nil {
+		log.Fatal(err)
+	}
 	client := blizzard.NewClient(
 		cfg.BlizzardRegion,
 		cfg.BlizzardLocale,
@@ -79,23 +84,31 @@ func main() {
 		cfg.OAuthRedirectURL,
 	)
 	client.Log = logg
-	service := &appsync.Service{
-		Engine: appsync.Engine{
-			Client: client,
-			Stores: stores,
-			Log:    logg,
-		},
-		Guild:    guild,
-		Log:      logg,
-		Notifier: notify.NewDiscord(cfg.DiscordWebhookURL, logg),
+	allGuilds, err := stores.Guilds.List(ctx)
+	if err != nil {
+		log.Fatal(err)
 	}
-	service.Engine.Progress = service.ReportProgress
-	scheduler := sched.New(cfg.SyncSchedule, logg)
-	go scheduler.Run(ctx, func(c context.Context) {
-		if _, err := service.Start(c, "scheduled"); err != nil {
-			logg.Warn("scheduled sync failed", "error", err)
+	services := make(map[int64]*appsync.Service, len(allGuilds))
+	var servicesMu sync.RWMutex
+	for _, g := range allGuilds {
+		g := g
+		service := &appsync.Service{Engine: appsync.Engine{Client: client, Stores: stores, Log: logg}, Guild: g, Log: logg, Notifier: notify.NewDiscord(g.DiscordWebhookURL, logg)}
+		service.Engine.Progress = service.ReportProgress
+		servicesMu.Lock()
+		services[g.ID] = service
+		servicesMu.Unlock()
+		schedule := g.SyncSchedule
+		if schedule == "" {
+			schedule = cfg.SyncSchedule
 		}
-	})
+		scheduler := sched.New(schedule, logg)
+		go scheduler.Run(ctx, func(c context.Context) {
+			if _, err := service.Start(c, "scheduled"); err != nil {
+				logg.Warn("scheduled sync failed", "guild", g.Slug, "error", err)
+			}
+		})
+	}
+	defaultService := services[guild.ID]
 	sweeper := sched.NewSweeper(sweepInterval, logg)
 	go sweeper.Run(ctx, func(c context.Context) {
 		cutoff := time.Now().AddDate(0, 0, -cfg.SnapshotRetentionDays)
@@ -115,16 +128,36 @@ func main() {
 	manager.Log = logg
 	manager.SuperAdminBattleTags = cfg.SuperAdminBattleTags
 	trigger := httpapi.TriggerFunc(func(c context.Context) (int64, error) {
-		r, e := service.StartManual(c)
+		r, e := defaultService.StartManual(c)
 		return r.ID, e
 	})
 	api := httpapi.New(httpapi.API{
-		Stores:                stores,
-		Auth:                  manager,
-		GuildSlug:             guild.Slug,
-		Trigger:               trigger,
-		Progress:              service,
-		Operations:            service,
+		Stores:     stores,
+		Auth:       manager,
+		GuildSlug:  guild.Slug,
+		Trigger:    trigger,
+		Progress:   defaultService,
+		Operations: defaultService,
+		ScopedTrigger: func(c context.Context, g domain.Guild) (int64, error) {
+			servicesMu.RLock()
+			s := services[g.ID]
+			servicesMu.RUnlock()
+			if s == nil {
+				return 0, errors.New("sync unavailable for guild")
+			}
+			r, err := s.StartManual(c)
+			return r.ID, err
+		},
+		ScopedOperations: func(g domain.Guild) httpapi.SyncOperations {
+			servicesMu.RLock()
+			defer servicesMu.RUnlock()
+			return services[g.ID]
+		},
+		ScopedProgress: func(g domain.Guild) httpapi.ProgressReporter {
+			servicesMu.RLock()
+			defer servicesMu.RUnlock()
+			return services[g.ID]
+		},
 		Ping:                  pool,
 		SnapshotRetentionDays: cfg.SnapshotRetentionDays,
 		StaticDir:             cfg.StaticDir,
@@ -139,7 +172,11 @@ func main() {
 		shutdown, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
 		_ = server.Shutdown(shutdown)
-		_ = service.Shutdown(shutdown)
+		servicesMu.RLock()
+		for _, service := range services {
+			_ = service.Shutdown(shutdown)
+		}
+		servicesMu.RUnlock()
 	}()
 	logg.Info("server starting", "port", cfg.ServerPort)
 	if err = server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

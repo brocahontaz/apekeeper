@@ -12,7 +12,7 @@ Copy the example environment file and set the required values:
 cp .env.example .env
 ```
 
-`GUILD_REALM` is required (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth requires `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, and an OAuth application registration for the exact `OAUTH_REDIRECT_URL`. The default callback route is `http://localhost:5173/api/auth/callback` (`GET /api/auth/callback`): the browser authenticates on the frontend origin and the Vite dev server proxies `/api` to the backend, so after sign-in you land on the SPA at `http://localhost:5173` rather than the backend port. The optional `DISCORD_WEBHOOK_URL` posts a summary of every finished sync run to a Discord channel webhook; leave it empty to disable notifications.
+`GUILD_REALM` is required for the initial Ape Enclosure bootstrap (use the Blizzard realm slug, such as `area-52`). Blizzard OAuth credentials are platform-global. After sign-in, `GET /api/guilds` lists memberships and `POST /api/guilds/select` safely switches the HttpOnly-selected guild. The optional `DISCORD_WEBHOOK_URL` remains the legacy bootstrap default; new guild settings are stored per guild.
 
 ### Native backend and frontend
 
@@ -60,7 +60,7 @@ frontend/  Svelte 5/Vite control-room SPA
 docs/      operations and architecture notes
 ```
 
-Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. When `DISCORD_WEBHOOK_URL` is set, each finished run's notification outcome (sent, skipped, or failed) is recorded on the run and shown in the officer sync-run history. The first authenticated user becomes an admin; ApeKeeper roles are application roles, deliberately independent of Blizzard guild ranks. The platform-level `superadmin` role has at least every admin capability and is granted at sign-in to BattleTags listed in the optional `SUPER_ADMIN_BATTLETAGS` variable (comma-separated, trimmed); it is intended for the repository or platform owner rather than the guild's actual GM, who holds the `admin` ("Guild Master") role.
+Sync runs nightly at 03:00 UTC and may be manually triggered by an admin. When `DISCORD_WEBHOOK_URL` is set, each finished run's notification outcome (sent, skipped, or failed) is recorded on the run and shown in the officer sync-run history. Migration 0007 bootstraps existing users into the single Ape Enclosure guild; existing admins become owners. Membership roles are explicit and independent of Blizzard guild ranks. The platform-level `superadmin` role may select any guild and is granted at sign-in to configured BattleTags.
 
 ## Sync operations
 
@@ -88,4 +88,4 @@ cd frontend && npm run test && npm run build
 
 For troubleshooting sync or API failures, set `LOG_LEVEL=debug` in the backend environment to enable structured sync and request debug logging on stdout.
 
-The schema is guild-scoped and ready for multi-guild support; the UI currently presents Ape Enclosure.
+Guild data and mutations are selected and authorized server-side. The UI shows a switcher for users with multiple memberships. See `docs/multi-guild.md` for bootstrap and operating policy.

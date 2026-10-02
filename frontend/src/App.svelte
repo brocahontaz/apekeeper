@@ -10,6 +10,7 @@
   import CharacterDetail from "$routes/CharacterDetail.svelte";
   import Sync from "$routes/Sync.svelte";
   import Officer from "$routes/Officer.svelte";
+  import Memberships from "$routes/Memberships.svelte";
   import Login from "$routes/Login.svelte";
   import NotFound from "$routes/NotFound.svelte";
   const routes: Route[] = [
@@ -18,9 +19,14 @@
     { path: "/characters/{name}", component: CharacterDetail },
     { path: "/sync", component: Sync },
     { path: "/officer", component: Officer },
+    { path: "/members", component: Memberships },
     { path: "/login", component: Login },
   ];
   let tick = $state(0);
+  let guilds = $state<
+    { id: number; slug: string; name: string; realm: string; region: string; role: string }[]
+  >([]);
+  let selectedGuild = $state("");
   let active = $derived.by(() => {
     tick;
     return match(routes);
@@ -32,6 +38,10 @@
       .me()
       .then((u) => {
         currentUser.set(u);
+        client.guilds().then((items) => {
+          guilds = items;
+          selectedGuild = items.find((item) => item.selected)?.slug ?? items[0]?.slug ?? "";
+        });
         if (location.pathname === "/login") navigate("/");
       })
       .catch(() => {
@@ -44,6 +54,11 @@
     currentUser.set(null);
     navigate("/login");
   }
+  async function switchGuild() {
+    if (!selectedGuild) return;
+    await client.selectGuild(selectedGuild);
+    location.reload();
+  }
 </script>
 
 {#if active?.route.path === "/login"}<Login />{:else}<div class="shell">
@@ -52,7 +67,7 @@
       <nav>
         <a href="/">The Enclosure</a><a href="/roster">Roster</a><a href="/officer"
           >Officer workflow</a
-        ><a href="/sync">Keeper Controls</a>
+        ><a href="/sync">Keeper Controls</a><a href="/members">Memberships</a>
       </nav>
     </aside>
     <main>
@@ -60,7 +75,14 @@
         <span>EXPEDITION LOG / {new Date().toLocaleDateString()}</span>
         <span class="topbar-actions">
           {#if $currentUser}<span
-              >{$currentUser.battletag}
+              >{#if guilds.length > 1}<select
+                  bind:value={selectedGuild}
+                  onchange={switchGuild}
+                  aria-label="Current guild"
+                  >{#each guilds as guild}<option value={guild.slug}>{guild.name}</option
+                    >{/each}</select
+                >{/if}
+              {$currentUser.battletag}
               <b
                 >{$currentUser.appRole === "superadmin"
                   ? "Super Admin"
@@ -78,6 +100,7 @@
         />{:else if active?.route.path === "/roster"}<Roster
         />{:else if active?.route.path === "/sync"}<Sync
         />{:else if active?.route.path === "/officer"}<Officer
+        />{:else if active?.route.path === "/members"}<Memberships
         />{:else if active?.route.path === "/characters/{name}"}<CharacterDetail
           name={active.params.name}
         />{:else}<NotFound />{/if}
