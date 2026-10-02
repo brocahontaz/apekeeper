@@ -28,6 +28,21 @@ func (oauthFake) UserProfile(context.Context, string) (dto.UserProfile, error) {
 
 type profileErrFake struct{ oauthFake }
 
+type stateFake struct{ states map[string]time.Time }
+
+func (s *stateFake) CreateOAuthState(_ context.Context, state string, expires time.Time) error {
+	if s.states == nil {
+		s.states = map[string]time.Time{}
+	}
+	s.states[state] = expires
+	return nil
+}
+func (s *stateFake) ConsumeOAuthState(_ context.Context, state string, now time.Time) (bool, error) {
+	expires, ok := s.states[state]
+	delete(s.states, state)
+	return ok && now.Before(expires), nil
+}
+
 func (profileErrFake) UserProfile(context.Context, string) (dto.UserProfile, error) {
 	return dto.UserProfile{}, errors.New("userinfo unavailable")
 }
@@ -46,10 +61,34 @@ func TestStateIsSingleUseAndExpires(t *testing.T) {
 		t.Fatal("expired state accepted")
 	}
 }
+
+func TestPersistentOAuthStateRejectsInvalidReplayAndExpired(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	stateStore := &stateFake{}
+	m := New(oauthFake{}, store.UserStore{}, "http://callback", []byte("test"))
+	m.Now = func() time.Time { return now }
+	m.StateStore = stateStore
+	u, _ := url.Parse(m.AuthorizationURL())
+	state := u.Query().Get("state")
+	if m.consumeState("not-the-state") || !m.consumeState(state) || m.consumeState(state) {
+		t.Fatal("persistent OAuth state was not single-use and invalid-state safe")
+	}
+	stateStore.states["expired"] = now.Add(-time.Second)
+	if m.consumeState("expired") {
+		t.Fatal("expired persistent state accepted")
+	}
+}
 func TestCookieSignatureRoundTrip(t *testing.T) {
 	m := New(oauthFake{}, store.UserStore{}, "", []byte("test"))
 	r := httptest.NewRequest("GET", "http://example.test", nil)
 	c := m.cookie(r, "session", time.Now().Add(time.Hour))
+	if !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Path != "/" || c.Secure {
+		t.Fatalf("cookie attributes=%+v, want HttpOnly Lax root and insecure for HTTP", c)
+	}
+	tlsRequest := httptest.NewRequest("GET", "https://example.test", nil)
+	if !m.cookie(tlsRequest, "session", time.Now()).Secure {
+		t.Fatal("HTTPS session cookie is not Secure")
+	}
 	r.AddCookie(c)
 	id, err := m.sessionID(r)
 	if err != nil || id != "session" {

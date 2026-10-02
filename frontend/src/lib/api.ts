@@ -173,7 +173,18 @@ export class ApiError extends Error {
   }
 }
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: "same-origin", ...init });
+  const csrf =
+    typeof document !== "undefined"
+      ? document.cookie
+          .split(";")
+          .map((v) => v.trim())
+          .find((v) => v.startsWith("apekeeper_csrf="))
+          ?.slice("apekeeper_csrf=".length)
+      : undefined;
+  const headers = new Headers(init?.headers);
+  if (csrf && init?.method && init.method !== "GET" && init.method !== "HEAD")
+    headers.set("X-CSRF-Token", decodeURIComponent(csrf));
+  const response = await fetch(path, { credentials: "same-origin", ...init, headers });
   if (response.status === 401) {
     sessionExpired.set(true);
     currentUser.set(null);

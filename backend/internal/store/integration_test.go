@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,41 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 	"github.com/brocahontaz/apekeeper/backend/internal/testdb"
 )
+
+func TestOAuthStateConsumeIsAtomicAndSingleUse(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	state := "integration-oauth-state-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	now := time.Now().Truncate(time.Microsecond)
+	if err := s.Users.CreateOAuthState(ctx, state, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan bool, 16)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := s.Users.ConsumeOAuthState(ctx, state, now)
+			if err != nil {
+				t.Errorf("ConsumeOAuthState error = %v", err)
+			}
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	close(results)
+	accepted := 0
+	for ok := range results {
+		if ok {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted consumes = %d, want exactly one", accepted)
+	}
+}
 
 // This intentionally skips in unit-only environments; docker compose supplies DATABASE_URL.
 func TestMigrationAndEnsureGuild(t *testing.T) {

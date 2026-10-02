@@ -1,16 +1,70 @@
 package logger
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
 func New(level string) *slog.Logger {
 	var l slog.Level
 	_ = l.UnmarshalText([]byte(level))
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l, ReplaceAttr: redactAttr}))
+}
+
+var sensitiveKeys = map[string]bool{"access_token": true, "refresh_token": true, "client_secret": true, "authorization": true, "cookie": true, "set-cookie": true, "webhook_url": true, "webhook": true, "password": true, "secret": true}
+
+func Redact(value string) string {
+	var nested any
+	if json.Unmarshal([]byte(value), &nested) == nil {
+		if b, err := json.Marshal(redactJSON(nested)); err == nil {
+			return string(b)
+		}
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"access_token=", "refresh_token=", "authorization=", "cookie=", "webhook"} {
+		if i := strings.Index(lower, marker); i >= 0 {
+			return value[:i] + "[REDACTED]"
+		}
+	}
+	if u, err := url.Parse(value); err == nil && strings.Contains(strings.ToLower(u.Path), "/webhook/") {
+		return u.Scheme + "://" + u.Host + "/[REDACTED]"
+	}
+	return value
+}
+func redactJSON(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, value := range x {
+			key := strings.ToLower(k)
+			if sensitiveKeys[key] || strings.Contains(key, "token") || strings.Contains(key, "secret") {
+				x[k] = "[REDACTED]"
+			} else {
+				x[k] = redactJSON(value)
+			}
+		}
+	case []any:
+		for i := range x {
+			x[i] = redactJSON(x[i])
+		}
+	}
+	return v
+}
+func redactAttr(_ []string, a slog.Attr) slog.Attr {
+	if sensitiveKeys[strings.ToLower(a.Key)] {
+		return slog.String(a.Key, "[REDACTED]")
+	}
+	if a.Value.Kind() == slog.KindString {
+		return slog.String(a.Key, Redact(a.Value.String()))
+	}
+	if a.Value.Kind() == slog.KindAny {
+		return slog.Any(a.Key, redactJSON(a.Value.Any()))
+	}
+	return a
 }
 
 // statusWriter captures the response status code for request logging. A

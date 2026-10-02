@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"time"
 
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
@@ -9,6 +10,25 @@ import (
 )
 
 type UserStore struct{ pool *pgxpool.Pool }
+
+// CreateOAuthState stores only a digest of the browser-visible state. The
+// unique key and conditional delete make callback consumption atomic.
+func (s UserStore) CreateOAuthState(ctx context.Context, state string, expiresAt time.Time) error {
+	digest := sha256.Sum256([]byte(state))
+	_, err := s.pool.Exec(ctx, `INSERT INTO oauth_states(state_hash,expires_at) VALUES($1,$2)`, digest[:], expiresAt)
+	return err
+}
+
+func (s UserStore) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error) {
+	digest := sha256.Sum256([]byte(state))
+	tag, err := s.pool.Exec(ctx, `DELETE FROM oauth_states WHERE state_hash=$1 AND expires_at>$2`, digest[:], now)
+	return tag.RowsAffected() == 1, err
+}
+
+func (s UserStore) DeleteExpiredOAuthStates(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM oauth_states WHERE expires_at <= $1`, now)
+	return tag.RowsAffected(), err
+}
 
 func (s UserStore) SearchGuildCandidates(ctx context.Context, guildID int64, query string) ([]map[string]any, error) {
 	rows, err := s.pool.Query(ctx, `SELECT u.id,COALESCE(u.display_name,''),i.battletag,u.app_role
@@ -134,4 +154,17 @@ func (s UserStore) DeleteSession(ctx context.Context, id string) error {
 func (s UserStore) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= $1`, now)
 	return tag.RowsAffected(), err
+}
+
+func (s UserStore) Audit(ctx context.Context, actorID, guildID int64, event string) error {
+	var actor any
+	if actorID != 0 {
+		actor = actorID
+	}
+	var guild any
+	if guildID != 0 {
+		guild = guildID
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO audit_events(actor_user_id,guild_id,event_type) VALUES($1,$2,$3)`, actor, guild, event)
+	return err
 }

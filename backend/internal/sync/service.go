@@ -38,6 +38,8 @@ type Service struct {
 	progress domain.Progress
 	cancel   context.CancelFunc
 	done     chan struct{}
+	notifyWG sync.WaitGroup
+	stopping bool
 }
 
 func (s *Service) Start(ctx context.Context, trigger string) (store.SyncRun, error) {
@@ -166,6 +168,9 @@ func (s *Service) complete(r store.SyncRun) {
 	done := s.done
 	s.done = nil
 	s.last = r
+	if s.Notifier != nil {
+		s.notifyWG.Add(1)
+	}
 	started := s.started
 	// The terminal snapshot keeps the run's final counts visible; the next
 	// begin overwrites it.
@@ -204,7 +209,10 @@ func (s *Service) complete(r store.SyncRun) {
 			Duration: time.Since(started),
 			Reasons:  runFailureReasons(r),
 		}
-		go s.recordNotification(summary, r.ID)
+		go func() {
+			defer s.notifyWG.Done()
+			s.recordNotification(summary, r.ID)
+		}()
 	}
 }
 
@@ -271,20 +279,36 @@ func (s *Service) Cancel() error {
 // finish, so process shutdown does not leave detached sync goroutines behind.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
+	s.stopping = true
 	done := s.done
 	if s.cancel != nil {
 		s.cancel()
 	}
 	s.mu.Unlock()
-	if done == nil {
-		return nil
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	doneNotifications := make(chan struct{})
+	go func() { s.notifyWG.Wait(); close(doneNotifications) }()
 	select {
-	case <-done:
+	case <-doneNotifications:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// NotificationHealthy reports whether this service can still finish notification
+// work. Disabled notification delivery is healthy by configuration; shutdown is
+// the only state that makes the subsystem unavailable.
+func (s *Service) NotificationHealthy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.stopping
 }
 func (s *Service) Status() store.SyncRun { s.mu.Lock(); defer s.mu.Unlock(); return s.last }
 func (s *Service) History(ctx context.Context, limit int) ([]store.SyncRun, error) {
