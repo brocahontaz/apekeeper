@@ -38,6 +38,17 @@ html.dark {
 * {
   box-sizing: border-box;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -511,6 +522,23 @@ code {
 .error {
   color: var(--error);
 }
+.error-state {
+  margin-top: 24px;
+  padding: 18px;
+  border: 1px solid var(--error);
+  background: var(--surface);
+}
+.error-state button {
+  border: 1px solid var(--border-accent);
+  background: transparent;
+  color: var(--accent);
+  padding: 8px 12px;
+}
+.refreshing {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 8px 0;
+}
 .skeleton {
   color: var(--muted);
 }
@@ -572,5 +600,67 @@ progress {
   .roster-cards .roster-card span {
     color: var(--muted);
     font-size: 11px;
+  }
+  .toolbar {
+    align-items: stretch;
+  }
+  .toolbar input,
+  .toolbar select,
+  .toolbar button,
+  .toolbar .export {
+    min-height: 42px;
+    max-width: 100%;
+  }
+  .toolbar > input:not(.num),
+  .toolbar > select {
+    flex: 1 1 180px;
+  }
+  .pagination button {
+    min-height: 42px;
+    padding-inline: 14px;
+  }
+  .character {
+    align-items: flex-start;
+  }
+  .character-stats {
+    gap: 10px;
+  }
+  section {
+    padding: 15px;
+  }
+}
+@media (min-width: 801px) and (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 190px 1fr;
+  }
+  .shell > main {
+    padding-inline: 20px;
+  }
+  .kpis {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  h1 {
+    font-size: 22px;
+  }
+  .topbar {
+    font-size: 10px;
+  }
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+  .character {
+    flex-direction: column;
+  }
+  .character h1 {
+    overflow-wrap: anywhere;
+  }
+  .history-charts {
+    grid-template-columns: 1fr;
   }
 }

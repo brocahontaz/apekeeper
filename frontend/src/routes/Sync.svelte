@@ -1,5 +1,6 @@
 <script lang="ts">
   import { client, ApiError, type SyncProgress, type SyncRun } from "$lib/api";
+  import { onDestroy } from "svelte";
   import { relativeTime } from "$lib/format";
   import { currentUser } from "$lib/stores";
   import {
@@ -15,8 +16,11 @@
   let error = $state("");
   let busy = $state(false);
   let loaded = $state(false);
+  let loading = $state(false);
+  let generation = 0;
   let progress = $state<SyncProgress | null>(null);
   let polling = $state(false);
+  let completionAnnouncement = $state("");
   let role = $derived($currentUser?.appRole);
   let canTrigger = $derived(canTriggerSync(role));
   let canViewRuns = $derived(canViewRunsFor(role));
@@ -34,12 +38,20 @@
     return () => clearInterval(timer);
   });
   async function load() {
+    const request = ++generation;
+    loading = true;
+    error = "";
     try {
-      runs = await client.runs();
+      const result = await client.runs();
+      if (request !== generation) return;
+      runs = result;
       loaded = true;
       if (runs[0]?.status === "running") startPolling();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Sync history unavailable";
+      if (request === generation)
+        error = e instanceof Error ? e.message : "Sync history unavailable";
+    } finally {
+      if (request === generation) loading = false;
     }
   }
   function startPolling() {
@@ -50,10 +62,16 @@
     progress = null;
   }
   async function poll() {
+    const request = generation;
     try {
       const p = await client.progress();
+      if (request !== generation) return;
       progress = p;
       if (!progressActive(p)) {
+        completionAnnouncement =
+          p.status === "success"
+            ? "Sync completed successfully."
+            : `Sync finished with status: ${p.status}.`;
         stopPolling();
         await load();
       }
@@ -63,6 +81,7 @@
       stopPolling();
     }
   }
+  onDestroy(() => generation++);
   async function trigger() {
     if (!confirm("Start a full guild sync?")) return;
     busy = true;
@@ -139,7 +158,21 @@
     >{/if}
   <p>Scheduled runs keep the ledger fresh nightly at 03:00 UTC.</p>
 </section>
-{#if error}<p class="error" role="status">{error}</p>{/if}
+{#if error}<section class="error-state" role="alert" aria-live="assertive">
+    <p class="error">{error}</p>
+    <button onclick={load}>Retry sync history</button>
+  </section>{/if}
+{#if completionAnnouncement}<p
+    class="sync-status"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+  >
+    {completionAnnouncement}
+  </p>{/if}
+{#if loading && !runs.length}<p class="skeleton" role="status" aria-live="polite">
+    Loading sync history…
+  </p>{/if}
 {#if canViewProgress && progress && progressActive(progress)}
   <section aria-live="polite">
     <h2>Expedition in progress</h2>
@@ -157,6 +190,7 @@
     </p>
   </section>{:else if canViewRuns}<section>
     <h2>Sync run history</h2>
+    {#if loading}<p class="refreshing" role="status">Refreshing sync history…</p>{/if}
     <div class="table-wrap">
       <table>
         <thead

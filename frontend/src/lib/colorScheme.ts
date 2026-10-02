@@ -25,6 +25,23 @@ function systemPrefersDark(): boolean {
   }
 }
 
+function watchSystemPreference(): void {
+  if (readStoredTheme() || typeof matchMedia !== "function") return;
+  const media = matchMedia("(prefers-color-scheme: dark)");
+  const update = (event: MediaQueryListEvent) => {
+    if (!readStoredTheme()) {
+      const value: Theme = event.matches ? "dark" : "light";
+      theme.set(value);
+      applyDocumentClass(value);
+    }
+  };
+  try {
+    media.addEventListener("change", update);
+  } catch {
+    media.addListener?.(update);
+  }
+}
+
 function initialTheme(): Theme {
   return readStoredTheme() ?? (systemPrefersDark() ? "dark" : "light");
 }
@@ -40,6 +57,7 @@ function applyDocumentClass(value: Theme): void {
 const initial = initialTheme();
 export const theme = writable<Theme>(initial);
 applyDocumentClass(initial);
+watchSystemPreference();
 
 export function setTheme(value: Theme): void {
   try {

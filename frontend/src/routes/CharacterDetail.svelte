@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { client, type Character, type History, type MythicRun, type Snapshot } from "$lib/api";
   import HistoryCharts from "$components/HistoryCharts.svelte";
   import { classColor } from "$lib/theme";
@@ -9,6 +8,10 @@
   let error = $state("");
   let history = $state<History | null>(null);
   let historyError = $state("");
+  let loading = $state(true);
+  let historyLoading = $state(false);
+  let generation = 0;
+  const current = $derived(character as Character);
   let compareFrom = $state("");
   let compareTo = $state("");
   const validNumber = (value: unknown): value is number =>
@@ -36,24 +39,42 @@
     bestKeyLevel: number;
     runs?: { best?: MythicRun[]; recent?: MythicRun[] };
   };
-  onMount(async () => {
+  async function loadCharacter(requestedName = name) {
+    const request = ++generation;
+    loading = true;
+    error = "";
+    character = null;
+    history = null;
+    historyError = "";
     try {
-      character = await client.character(name);
+      const result = await client.character(requestedName);
+      if (request !== generation) return;
+      character = result;
+      await loadHistory("", request);
     } catch (e) {
-      error = e instanceof Error ? e.message : "Character unavailable";
-      return;
+      if (request === generation) error = e instanceof Error ? e.message : "Character unavailable";
+    } finally {
+      if (request === generation) loading = false;
     }
-    await loadHistory();
+  }
+  $effect(() => {
+    const requestedName = name;
+    void loadCharacter(requestedName);
+    return () => generation++;
   });
-  async function loadHistory(query = "") {
+  async function loadHistory(query = "", request = generation) {
     if (!character) return;
+    historyLoading = true;
     historyError = "";
     try {
       const result = await client.history(character.id, query);
       if (!Array.isArray(result.snapshots)) throw new Error("History data is malformed");
-      history = result;
+      if (request === generation) history = result;
     } catch (e) {
-      historyError = e instanceof Error ? e.message : "History unavailable";
+      if (request === generation)
+        historyError = e instanceof Error ? e.message : "History unavailable";
+    } finally {
+      if (request === generation) historyLoading = false;
     }
   }
   async function compare() {
@@ -75,36 +96,43 @@
 </script>
 
 <a href={`/roster${new URLSearchParams(location.search).get("roster") ?? ""}`}>← Roster</a
->{#if error}<p class="error">{error}</p>{:else if !character}<p class="skeleton">
+>{#if error}<section class="error-state" role="alert" aria-live="assertive">
+    <p class="error">{error}</p>
+    <button onclick={() => loadCharacter()}>Retry character request</button>
+  </section>{/if}{#if loading && !character && !error}<p
+    class="skeleton"
+    role="status"
+    aria-live="polite"
+  >
     Opening ape file…
-  </p>{:else}<header class="character">
+  </p>{:else if character}<header class="character">
     <div class="avatar">
-      {#if character.avatarUrl}
-        <img src={character.avatarUrl} alt={character.name} />
+      {#if current.avatarUrl}
+        <img src={current.avatarUrl} alt={current.name} />
       {:else}
-        {character.name[0]}
+        {current.name[0]}
       {/if}
     </div>
     <div>
-      <h1 style={`color:${classColor(character.classId)}`}>{character.name}</h1>
+      <h1 style={`color:${classColor(current.classId)}`}>{current.name}</h1>
       <div class="character-stats">
-        <span><small>Realm</small>{character.realm}</span><span
-          ><small>Class</small>{character.className}</span
-        ><span><small>Specialization</small>{character.specName}</span><span
-          ><small>Race</small>{raceLabel(character.raceName, character.gender)}</span
-        ><span><small>Level</small>{character.level}</span><span
-          ><small>Item level</small>{character.itemLevel}</span
+        <span><small>Realm</small>{current.realm}</span><span
+          ><small>Class</small>{current.className}</span
+        ><span><small>Specialization</small>{current.specName}</span><span
+          ><small>Race</small>{raceLabel(current.raceName, current.gender)}</span
+        ><span><small>Level</small>{current.level}</span><span
+          ><small>Item level</small>{current.itemLevel}</span
         >
       </div>
-      <span class:stale={character.stale}
-        >{character.stale ? "Needs attention" : `Synced ${relativeTime(character.syncedAt)}`}</span
+      <span class:stale={current.stale}
+        >{current.stale ? "Needs attention" : `Synced ${relativeTime(current.syncedAt)}`}</span
       >
     </div>
   </header>
   <div class="grid">
     <section>
       <h2>Mythic+ stats</h2>
-      {#each (character.mythicPlus as MythicRow[]) ?? [] as m}<div class="progression-row">
+      {#each (current.mythicPlus as MythicRow[]) ?? [] as m}<div class="progression-row">
           <strong>{m.season || "Current season"}</strong><span
             >Rating <b>{Math.round(m.overallRating).toLocaleString()}</b></span
           ><span>Best key <b>+{m.bestKeyLevel}</b></span>
@@ -130,7 +158,7 @@
     </section>
     <section>
       <h2>Raid stats</h2>
-      {#each (character.raidProgression as any[]) ?? [] as r}<div class="progression-row">
+      {#each (current.raidProgression as any[]) ?? [] as r}<div class="progression-row">
           <strong>{r.raidName || "Current tier"}</strong><span>{r.difficulty}</span><span
             ><progress value={r.progress} max={r.totalBosses}></progress>
             {r.progress}/{r.totalBosses}</span
@@ -139,7 +167,10 @@
     </section>
     <section>
       <h2>Progression history</h2>
-      {#if historyError}<p class="error">{historyError}</p>{:else if !history}<p class="skeleton">
+      {#if historyError}<section class="error-state" role="alert" aria-live="assertive">
+          <p class="error">{historyError}</p>
+          <button onclick={() => loadHistory()}>Retry history</button>
+        </section>{:else if !history}<p class="skeleton" role="status" aria-live="polite">
           Loading expedition history…
         </p>{:else}
         <p class="count">
