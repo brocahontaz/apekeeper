@@ -101,6 +101,17 @@ type recordingNotifier struct {
 	outcome notify.Outcome
 }
 
+type blockingNotifier struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (n *blockingNotifier) NotifySyncRun(notify.SyncRunSummary) notify.Outcome {
+	n.started <- struct{}{}
+	<-n.release
+	return notify.Outcome{Status: notify.OutcomeSent}
+}
+
 func (r *recordingNotifier) NotifySyncRun(s notify.SyncRunSummary) notify.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -453,6 +464,42 @@ func TestServiceShutdownWaitsForActiveRun(t *testing.T) {
 	history, err := s.SyncRuns.History(context.Background(), g.ID, 1)
 	if err != nil || len(history) != 1 || history[0].ID != run.ID || history[0].Status != domain.RunFailed {
 		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+func TestServiceShutdownWaitsForInFlightNotification(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	e, _, g := testEngine(t, &fakeClient{ilvl: 600})
+	service := Service{
+		Engine:   e,
+		Guild:    g,
+		Notifier: &blockingNotifier{started: started, release: release},
+	}
+	if _, err := service.Start(context.Background(), "manual"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("notification did not start")
+	}
+
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdown:
+		t.Fatalf("Shutdown returned before notification delivery finished: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-shutdown:
+		if err != nil {
+			t.Fatalf("Shutdown() error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not wait for notification delivery")
 	}
 }
 

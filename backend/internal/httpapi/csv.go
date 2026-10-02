@@ -24,6 +24,9 @@ func (a API) rosterExport(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "guild lookup failed")
 		return
 	}
+	if !a.audited(w, r, "roster_export") {
+		return
+	}
 	// The export's default sort stays the name order the unfiltered export
 	// has always used.
 	f, sort, descending, e := parseRosterQuery(r.URL.Query(), a.now().Add(-7*24*time.Hour), store.CharacterSortName)

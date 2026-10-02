@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestSchedulerHealthTracksStartupFailureAndShutdown(t *testing.T) {
+	h := &schedulerHealth{expected: 1}
+	if h.check(context.Background()) == nil {
+		t.Fatal("scheduler reported healthy before startup")
+	}
+	h.started.Add(1)
+	if err := h.check(context.Background()); err != nil {
+		t.Fatalf("started scheduler unhealthy: %v", err)
+	}
+	h.stopped.Add(1)
+	if h.check(context.Background()) == nil {
+		t.Fatal("stopped scheduler reported healthy")
+	}
+}
+
 type testPinger struct{ err error }
 
 func (p testPinger) Ping(context.Context) error { return p.err }

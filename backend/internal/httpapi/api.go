@@ -19,6 +19,7 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/auth"
 	"github.com/brocahontaz/apekeeper/backend/internal/db"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
+	"github.com/brocahontaz/apekeeper/backend/internal/logger"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 )
 
@@ -65,8 +66,15 @@ type API struct {
 	SnapshotRetentionDays int
 	// Frontend optionally supplies a built SPA filesystem. When nil, the
 	// conventional ./frontend/dist directory is used if it exists.
-	Frontend  fs.FS
-	StaticDir string
+	Frontend        fs.FS
+	StaticDir       string
+	CSRFEnabled     bool
+	MaxRequestBody  int64
+	RateLimit       int
+	RateLimitWindow time.Duration
+	Security        SecurityLimits
+	ReadinessChecks map[string]func(context.Context) error
+	ShuttingDown    func() bool
 }
 type contextKey struct{}
 type guildContextKey struct{}
@@ -89,6 +97,8 @@ func New(a API) http.Handler {
 	m.Handle("POST /api/guilds/select", a.requireAuth(http.HandlerFunc(a.selectGuild)))
 	m.HandleFunc("GET /healthz", a.health)
 	m.HandleFunc("GET /api/healthz", a.health)
+	m.HandleFunc("GET /readyz", a.readiness)
+	m.HandleFunc("GET /api/readyz", a.readiness)
 	m.Handle("GET /api/dashboard", a.requireGuild(http.HandlerFunc(a.dashboard)))
 	m.Handle("GET /api/roster", a.requireGuild(http.HandlerFunc(a.roster)))
 	m.Handle("GET /api/roster/export", a.requireGuild(http.HandlerFunc(a.rosterExport)))
@@ -115,7 +125,34 @@ func New(a API) http.Handler {
 	m.Handle("POST /api/guild/members", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.inviteMember)))
 	m.Handle("PUT /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.updateMember)))
 	m.Handle("DELETE /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.removeMember)))
-	return spa(m, a.Frontend, a.StaticDir)
+	var h http.Handler = m
+	if a.CSRFEnabled {
+		h = csrfCookie(csrf(h))
+	}
+	if a.MaxRequestBody > 0 || a.Security.AuthBody > 0 {
+		inner := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			max := a.MaxRequestBody
+			if _, body := a.Security.category(r); body > 0 {
+				max = body
+			}
+			if max > 0 {
+				r.Body = http.MaxBytesReader(w, r.Body, max)
+			}
+			inner.ServeHTTP(w, r)
+		})
+	}
+	if a.Security.Auth > 0 || a.Security.Sync > 0 || a.Security.Export > 0 || a.Security.Mutation > 0 {
+		a.Security.Window = a.RateLimitWindow
+		h = limitRequestsByCategory(a.Security, h)
+	} else if a.RateLimit > 0 {
+		window := a.RateLimitWindow
+		if window <= 0 {
+			window = time.Minute
+		}
+		h = limitRequests(a.RateLimit, window, h)
+	}
+	return spa(h, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
 	if frontend == nil {
@@ -129,7 +166,7 @@ func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
 	}
 	files := http.FileServer(http.FS(frontend))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || strings.HasPrefix(r.URL.Path, "/api") || r.URL.Path == "/healthz" {
+		if r.Method != http.MethodGet || strings.HasPrefix(r.URL.Path, "/api") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			api.ServeHTTP(w, r)
 			return
 		}
@@ -252,6 +289,42 @@ func (a API) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]string{"status": "ok", "db": "ok"})
+}
+func (a API) readiness(w http.ResponseWriter, r *http.Request) {
+	components := map[string]string{"db": "ok"}
+	status := http.StatusOK
+	if a.Ping != nil && a.Ping.Ping(r.Context()) != nil {
+		components["db"] = "degraded"
+		status = http.StatusServiceUnavailable
+	}
+	for name, check := range a.ReadinessChecks {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		err := check(ctx)
+		cancel()
+		if err != nil {
+			components[name] = "degraded"
+			status = http.StatusServiceUnavailable
+		} else {
+			components[name] = "ok"
+		}
+	}
+	if a.ShuttingDown != nil && a.ShuttingDown() {
+		components["shutdown"] = "draining"
+		status = http.StatusServiceUnavailable
+	}
+	jsonOut(w, status, map[string]any{"status": map[bool]string{true: "ready", false: "degraded"}[status == http.StatusOK], "components": components})
+}
+func (a API) audit(r *http.Request, event string) error {
+	u, _ := r.Context().Value(contextKey{}).(domain.User)
+	g, _ := a.guild(r.Context())
+	return a.Stores.Users.Audit(r.Context(), u.ID, g.ID, event)
+}
+func (a API) audited(w http.ResponseWriter, r *http.Request, event string) bool {
+	if err := a.audit(r, event); err != nil {
+		fail(w, http.StatusInternalServerError, "audit recording failed")
+		return false
+	}
+	return true
 }
 func (a API) me(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(contextKey{}).(domain.User)
@@ -391,6 +464,9 @@ func (a API) inviteMember(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "could not grant membership")
 		return
 	}
+	if !a.audited(w, r, "member_invite") {
+		return
+	}
 	jsonOut(w, 201, map[string]any{"userId": userID, "role": in.Role})
 }
 func (a API) updateMember(w http.ResponseWriter, r *http.Request) {
@@ -420,6 +496,9 @@ func (a API) updateMember(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "could not update membership")
 		return
 	}
+	if !a.audited(w, r, "role_change") {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a API) removeMember(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +518,9 @@ func (a API) removeMember(w http.ResponseWriter, r *http.Request) {
 	}
 	if err = a.Stores.Memberships.Revoke(r.Context(), g.ID, id); err != nil {
 		fail(w, 400, "could not remove membership")
+		return
+	}
+	if !a.audited(w, r, "member_remove") {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -978,6 +1060,9 @@ func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, 202, map[string]any{"runId": id})
+		if !a.audited(w, r, "sync_trigger") {
+			return
+		}
 		return
 	}
 	if trigger == nil || (a.GuildSlug != "" && g.Slug != a.GuildSlug) {
@@ -994,6 +1079,9 @@ func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 202, map[string]any{"runId": id})
+	if !a.audited(w, r, "sync_trigger") {
+		return
+	}
 }
 func (a API) dryRun(w http.ResponseWriter, r *http.Request) {
 	g, _ := a.guild(r.Context())
@@ -1006,7 +1094,7 @@ func (a API) dryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, e := operations.StartDryRun(r.Context())
-	a.operationResult(w, run, e)
+	a.operationResult(w, run, e, r, "sync_dry_run")
 }
 func (a API) retrySync(w http.ResponseWriter, r *http.Request) {
 	g, _ := a.guild(r.Context())
@@ -1024,7 +1112,7 @@ func (a API) retrySync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, e := operations.StartRetry(r.Context(), id)
-	a.operationResult(w, run, e)
+	a.operationResult(w, run, e, r, "sync_retry")
 }
 func (a API) cancelSync(w http.ResponseWriter, r *http.Request) {
 	g, _ := a.guild(r.Context())
@@ -1040,9 +1128,12 @@ func (a API) cancelSync(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "no sync is running")
 		return
 	}
+	if !a.audited(w, r, "sync_cancel") {
+		return
+	}
 	jsonOut(w, 202, map[string]bool{"cancelled": true})
 }
-func (a API) operationResult(w http.ResponseWriter, run store.SyncRun, e error) {
+func (a API) operationResult(w http.ResponseWriter, run store.SyncRun, e error, r *http.Request, event string) {
 	if e != nil {
 		if strings.Contains(e.Error(), "already running") {
 			fail(w, 409, "sync already running")
@@ -1051,6 +1142,9 @@ func (a API) operationResult(w http.ResponseWriter, run store.SyncRun, e error) 
 		} else {
 			fail(w, 500, "could not trigger sync")
 		}
+		return
+	}
+	if !a.audited(w, r, event) {
 		return
 	}
 	jsonOut(w, 202, map[string]any{"runId": run.ID})
@@ -1112,6 +1206,9 @@ func (a API) officerBulkTags(w http.ResponseWriter, r *http.Request) {
 		officerBulkError(w, e)
 		return
 	}
+	if !a.audited(w, r, "officer_bulk_tags") {
+		return
+	}
 	jsonOut(w, 200, map[string]any{"updated": len(in.CharacterIDs)})
 }
 func (a API) officerComplete(w http.ResponseWriter, r *http.Request) {
@@ -1134,6 +1231,9 @@ func (a API) officerComplete(w http.ResponseWriter, r *http.Request) {
 		officerBulkError(w, e)
 		return
 	}
+	if !a.audited(w, r, "officer_complete") {
+		return
+	}
 	jsonOut(w, 200, map[string]any{"completed": len(in.CharacterIDs) + len(in.SyncRunIDs)})
 }
 func officerCompletionIDs(characterIDs, syncRunIDs []int64) bool {
@@ -1145,7 +1245,9 @@ func officerBulkError(w http.ResponseWriter, err error) {
 		jsonOut(w, http.StatusBadRequest, map[string]any{"error": validation.Error(), "details": validation})
 		return
 	}
-	fail(w, http.StatusBadRequest, err.Error())
+	// Upstream/database errors can contain request payloads or URLs; never
+	// reflect those implementation details into an API response.
+	fail(w, http.StatusBadRequest, logger.Redact("officer request rejected"))
 }
 func (a API) officerActivity(w http.ResponseWriter, r *http.Request) {
 	g, e := a.guild(r.Context())
@@ -1186,7 +1288,10 @@ func (a API) officerCharacter(w http.ResponseWriter, r *http.Request) {
 	}
 	u := r.Context().Value(contextKey{}).(domain.User)
 	if e = a.Stores.Officer.Update(r.Context(), g.ID, u.ID, id, in.Note, in.LifecycleStatus, in.Tags); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, 400, "officer update rejected")
+		return
+	}
+	if !a.audited(w, r, "officer_character_update") {
 		return
 	}
 	jsonOut(w, 200, map[string]bool{"updated": true})

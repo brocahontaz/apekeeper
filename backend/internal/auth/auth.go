@@ -25,6 +25,10 @@ type OAuthClient interface {
 	ExchangeCode(context.Context, string) (dto.Token, error)
 	UserProfile(context.Context, string) (dto.UserProfile, error)
 }
+type StateStore interface {
+	CreateOAuthState(context.Context, string, time.Time) error
+	ConsumeOAuthState(context.Context, string, time.Time) (bool, error)
+}
 type Manager struct {
 	OAuth       OAuthClient
 	Users       store.UserStore
@@ -34,10 +38,12 @@ type Manager struct {
 	// BattleTags; a matching sign-in is stored with the superadmin role.
 	SuperAdminBattleTags []string
 	// Log is optional; when nil failures fall back to slog.Default().
-	Log    *slog.Logger
-	Now    func() time.Time
-	mu     sync.Mutex
-	states map[string]time.Time
+	Log        *slog.Logger
+	Now        func() time.Time
+	StateStore StateStore
+	Audit      func(context.Context, string) error
+	mu         sync.Mutex
+	states     map[string]time.Time
 }
 
 func New(o OAuthClient, users store.UserStore, redirect string, secret []byte) *Manager {
@@ -84,39 +90,71 @@ func token() string {
 }
 func (m *Manager) AuthorizationURL() string {
 	state := token()
-	m.mu.Lock()
-	m.states[state] = m.now().Add(10 * time.Minute)
-	m.mu.Unlock()
+	expires := m.now().Add(10 * time.Minute)
+	if m.StateStore != nil {
+		// Login cannot safely proceed if state persistence is unavailable.
+		if err := m.StateStore.CreateOAuthState(context.Background(), state, expires); err != nil {
+			m.logger().Error("OAuth state persistence failed", "error", err)
+			return ""
+		}
+	} else {
+		m.mu.Lock()
+		m.states[state] = expires
+		m.mu.Unlock()
+	}
 	return m.OAuth.AuthorizationURL(m.RedirectURL, state)
 }
-func (m *Manager) consumeState(state string) bool {
+func (m *Manager) consumeStateContext(ctx context.Context, state string) bool {
+	if m.StateStore != nil {
+		ok, err := m.StateStore.ConsumeOAuthState(ctx, state, m.now())
+		return err == nil && ok
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	expires, ok := m.states[state]
 	delete(m.states, state)
 	return ok && m.now().Before(expires)
 }
+func (m *Manager) consumeState(state string) bool {
+	return m.consumeStateContext(context.Background(), state)
+}
+func (m *Manager) audit(ctx context.Context, event string) {
+	if m.Audit != nil {
+		if err := m.Audit(ctx, event); err != nil {
+			m.logger().Error("audit event failed", "event", event, "error", err)
+		}
+	}
+}
 func (m *Manager) Login(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, m.AuthorizationURL(), http.StatusFound)
+	location := m.AuthorizationURL()
+	if location == "" {
+		http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	http.Redirect(w, r, location, http.StatusFound)
 }
 func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
-	if !m.consumeState(r.URL.Query().Get("state")) {
+	if !m.consumeStateContext(r.Context(), r.URL.Query().Get("state")) {
+		m.audit(r.Context(), "sign_in_failure")
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		m.audit(r.Context(), "sign_in_failure")
 		http.Error(w, "missing OAuth code", http.StatusBadRequest)
 		return
 	}
 	t, err := m.OAuth.ExchangeCode(r.Context(), code)
 	if err != nil {
+		m.audit(r.Context(), "sign_in_failure")
 		m.logger().Warn("OAuth token exchange failed", "error", err)
 		http.Error(w, "OAuth token exchange failed", http.StatusBadGateway)
 		return
 	}
 	p, err := m.OAuth.UserProfile(r.Context(), t.AccessToken)
 	if err != nil {
+		m.audit(r.Context(), "sign_in_failure")
 		m.logger().Warn("OAuth profile fetch failed", "error", err)
 		http.Error(w, "OAuth profile fetch failed", http.StatusBadGateway)
 		return
@@ -131,15 +169,18 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 		isSuperAdmin(m.SuperAdminBattleTags, p.BattleTag),
 	)
 	if err != nil {
+		m.audit(r.Context(), "sign_in_failure")
 		http.Error(w, "could not save user", http.StatusInternalServerError)
 		return
 	}
 	id := token()
 	expires := m.now().Add(7 * 24 * time.Hour)
 	if err = m.Users.CreateSession(r.Context(), id, u.ID, expires); err != nil {
+		m.audit(r.Context(), "sign_in_failure")
 		http.Error(w, "could not create session", http.StatusInternalServerError)
 		return
 	}
+	m.audit(r.Context(), "sign_in_success")
 	http.SetCookie(w, m.cookie(r, id, expires))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -199,8 +240,9 @@ func (m *Manager) CurrentUser(ctx context.Context, r *http.Request) (domain.User
 	return m.Users.SessionUser(ctx, id)
 }
 func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) {
+	var auditErr error
 	if id, e := m.sessionID(r); e == nil {
-		_ = m.Users.DeleteSession(r.Context(), id)
+		auditErr = m.Users.DeleteSession(r.Context(), id)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
@@ -211,5 +253,9 @@ func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   r.TLS != nil,
 	})
+	m.audit(r.Context(), "logout")
+	if auditErr != nil {
+		m.logger().Error("session revocation failed", "error", auditErr)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

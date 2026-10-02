@@ -23,6 +23,8 @@ var configVariables = []string{
 	"SUPER_ADMIN_BATTLETAGS",
 	"DISCORD_WEBHOOK_URL",
 	"STATIC_DIR",
+	"AUTH_RATE_LIMIT_PER_MINUTE", "SYNC_RATE_LIMIT_PER_MINUTE", "EXPORT_RATE_LIMIT_PER_MINUTE", "MUTATION_RATE_LIMIT_PER_MINUTE",
+	"AUTH_MAX_BODY_BYTES", "SYNC_MAX_BODY_BYTES", "EXPORT_MAX_BODY_BYTES", "MUTATION_MAX_BODY_BYTES",
 }
 
 func setConfigEnv(t *testing.T, values map[string]string) {
@@ -90,6 +92,9 @@ func TestLoadAcceptsCompleteConfigurationAndDefaults(t *testing.T) {
 		c.SnapshotRetentionDays != 90 ||
 		c.StaticDir != "" {
 		t.Errorf("Load() defaults = %+v, want documented defaults", c)
+	}
+	if c.AuthRateLimit != 20 || c.SyncRateLimit != 30 || c.ExportRateLimit != 30 || c.MutationRateLimit != 60 || c.AuthBodyLimit != 256<<10 || c.ExportBodyLimit != 4<<20 {
+		t.Errorf("security defaults = %+v", c)
 	}
 }
 

@@ -28,6 +28,18 @@ type Config struct {
 	SuperAdminBattleTags  []string
 	DiscordWebhookURL     string
 	StaticDir             string
+	CSRFEnabled           bool
+	MaxRequestBody        int64
+	RateLimit             int
+	RateLimitWindow       time.Duration
+	AuthRateLimit         int
+	SyncRateLimit         int
+	ExportRateLimit       int
+	MutationRateLimit     int
+	AuthBodyLimit         int64
+	SyncBodyLimit         int64
+	ExportBodyLimit       int64
+	MutationBodyLimit     int64
 }
 
 func Load() (Config, error) {
@@ -57,6 +69,18 @@ func Load() (Config, error) {
 		SuperAdminBattleTags:  parseBattleTags(os.Getenv("SUPER_ADMIN_BATTLETAGS")),
 		DiscordWebhookURL:     os.Getenv("DISCORD_WEBHOOK_URL"),
 		StaticDir:             os.Getenv("STATIC_DIR"),
+		CSRFEnabled:           envBool("CSRF_ENABLED", true),
+		MaxRequestBody:        envInt64("MAX_REQUEST_BODY_BYTES", 1<<20),
+		RateLimit:             envInt("RATE_LIMIT_PER_MINUTE", 120),
+		RateLimitWindow:       time.Minute,
+		AuthRateLimit:         envInt("AUTH_RATE_LIMIT_PER_MINUTE", 20),
+		SyncRateLimit:         envInt("SYNC_RATE_LIMIT_PER_MINUTE", 30),
+		ExportRateLimit:       envInt("EXPORT_RATE_LIMIT_PER_MINUTE", 30),
+		MutationRateLimit:     envInt("MUTATION_RATE_LIMIT_PER_MINUTE", 60),
+		AuthBodyLimit:         envInt64("AUTH_MAX_BODY_BYTES", 256<<10),
+		SyncBodyLimit:         envInt64("SYNC_MAX_BODY_BYTES", 256<<10),
+		ExportBodyLimit:       envInt64("EXPORT_MAX_BODY_BYTES", 4<<20),
+		MutationBodyLimit:     envInt64("MUTATION_MAX_BODY_BYTES", 256<<10),
 	}
 
 	missing := make([]string, 0, 6)
@@ -94,11 +118,55 @@ func Load() (Config, error) {
 	if _, err := strconv.Atoi(c.ServerPort); err != nil {
 		return c, fmt.Errorf("SERVER_PORT: %w", err)
 	}
+	if c.MaxRequestBody <= 0 || c.MaxRequestBody > 16<<20 {
+		return c, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be between 1 and 16777216")
+	}
+	if c.RateLimit <= 0 || c.RateLimit > 10000 {
+		return c, fmt.Errorf("RATE_LIMIT_PER_MINUTE must be between 1 and 10000")
+	}
+	for name, value := range map[string]int{"AUTH_RATE_LIMIT_PER_MINUTE": c.AuthRateLimit, "SYNC_RATE_LIMIT_PER_MINUTE": c.SyncRateLimit, "EXPORT_RATE_LIMIT_PER_MINUTE": c.ExportRateLimit, "MUTATION_RATE_LIMIT_PER_MINUTE": c.MutationRateLimit} {
+		if value <= 0 || value > 10000 {
+			return c, fmt.Errorf("%s must be between 1 and 10000", name)
+		}
+	}
+	for name, value := range map[string]int64{"AUTH_MAX_BODY_BYTES": c.AuthBodyLimit, "SYNC_MAX_BODY_BYTES": c.SyncBodyLimit, "EXPORT_MAX_BODY_BYTES": c.ExportBodyLimit, "MUTATION_MAX_BODY_BYTES": c.MutationBodyLimit} {
+		if value <= 0 || value > 16<<20 {
+			return c, fmt.Errorf("%s must be between 1 and 16777216", name)
+		}
+	}
 	var logLevel slog.Level
 	if err := logLevel.UnmarshalText([]byte(c.LogLevel)); err != nil {
 		return c, fmt.Errorf("LOG_LEVEL: %w", err)
 	}
 	return c, nil
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+func envBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err == nil {
+			return b
+		}
+	}
+	return fallback
 }
 
 func isPostgresURL(value string) bool {
