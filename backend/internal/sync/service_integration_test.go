@@ -11,6 +11,7 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/notify"
+	"github.com/brocahontaz/apekeeper/backend/internal/sched"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 	"github.com/brocahontaz/apekeeper/backend/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,6 +42,53 @@ func TestServiceStartManualCreatesRunningRunBeforeQueueing(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("run did not complete: history=%+v err=%v", history, err)
+}
+
+func TestScheduledGuildServicesUseTheirOwnGuildAndConfiguration(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p, _ := testdb.New(t)
+	stores := store.New(p)
+	firstGuild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "scheduled-one", Name: "One", Realm: "Area 52", Region: "us", SyncSchedule: "23:59"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGuild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "scheduled-two", Name: "Two", Realm: "Tichondrius", Region: "eu", SyncSchedule: "23:59"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &Service{Engine: Engine{Client: &fakeClient{ilvl: 601}, Stores: stores, Workers: 1}, Guild: firstGuild}
+	second := &Service{Engine: Engine{Client: &fakeClient{ilvl: 602}, Stores: stores, Workers: 1}, Guild: secondGuild}
+	firstScheduler := sched.New(firstGuild.SyncSchedule, slog.New(slog.DiscardHandler))
+	secondScheduler := sched.New(secondGuild.SyncSchedule, slog.New(slog.DiscardHandler))
+	go firstScheduler.Run(ctx, func(c context.Context) { _, _ = first.Start(c, "scheduled") })
+	go secondScheduler.Run(ctx, func(c context.Context) { _, _ = second.Start(c, "scheduled") })
+	firstScheduler.Trigger()
+	secondScheduler.Trigger()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		one, oneErr := stores.SyncRuns.History(ctx, firstGuild.ID, 1)
+		two, twoErr := stores.SyncRuns.History(ctx, secondGuild.ID, 1)
+		if oneErr == nil && twoErr == nil && len(one) == 1 && len(two) == 1 && one[0].Status == domain.RunSuccess && two[0].Status == domain.RunSuccess {
+			charsOne, err := stores.Characters.ListByGuild(ctx, firstGuild.ID, store.CharacterFilter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			charsTwo, err := stores.Characters.ListByGuild(ctx, secondGuild.ID, store.CharacterFilter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(charsOne) != 2 || len(charsTwo) != 2 || charsOne[0].ItemLevel != 601 || charsTwo[0].ItemLevel != 602 {
+				t.Fatalf("guild services mixed configuration: one=%+v two=%+v", charsOne, charsTwo)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	one, _ := stores.SyncRuns.History(ctx, firstGuild.ID, 1)
+	two, _ := stores.SyncRuns.History(ctx, secondGuild.ID, 1)
+	t.Fatalf("scheduled guild services did not complete independently: one=%+v two=%+v", one, two)
 }
 
 // recordingNotifier captures the summary the service hands to a notifier and

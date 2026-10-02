@@ -10,6 +10,53 @@ import (
 
 type UserStore struct{ pool *pgxpool.Pool }
 
+func (s UserStore) SearchGuildCandidates(ctx context.Context, guildID int64, query string) ([]map[string]any, error) {
+	rows, err := s.pool.Query(ctx, `SELECT u.id,COALESCE(u.display_name,''),i.battletag,u.app_role
+		FROM users u JOIN battle_net_identities i ON i.user_id=u.id
+		WHERE NOT EXISTS (SELECT 1 FROM guild_memberships m WHERE m.guild_id=$1 AND m.user_id=u.id)
+		AND ($2='' OR u.display_name ILIKE '%'||$2||'%' OR i.battletag ILIKE '%'||$2||'%')
+		ORDER BY u.display_name,u.id LIMIT 20`, guildID, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id int64
+		var name, tag, role string
+		if err := rows.Scan(&id, &name, &tag, &role); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"id": id, "displayName": name, "battletag": tag, "appRole": role})
+	}
+	return out, rows.Err()
+}
+
+func (s UserStore) FindGuildCandidate(ctx context.Context, guildID int64, battletag string) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `SELECT u.id FROM users u JOIN battle_net_identities i ON i.user_id=u.id
+		WHERE i.battletag=$2 AND NOT EXISTS (SELECT 1 FROM guild_memberships m WHERE m.guild_id=$1 AND m.user_id=u.id)`, guildID, battletag).Scan(&id)
+	return id, err
+}
+
+func (s UserStore) GuildMembers(ctx context.Context, guildID int64) ([]map[string]any, error) {
+	rows, err := s.pool.Query(ctx, `SELECT u.id,COALESCE(u.display_name,''),i.battletag,m.role FROM guild_memberships m JOIN users u ON u.id=m.user_id LEFT JOIN battle_net_identities i ON i.user_id=u.id WHERE m.guild_id=$1 ORDER BY u.display_name,u.id`, guildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id int64
+		var name, tag, role string
+		if err := rows.Scan(&id, &name, &tag, &role); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"id": id, "displayName": name, "battletag": tag, "role": role})
+	}
+	return out, rows.Err()
+}
+
 // UpsertBattleNetUser assigns the first user administrator access as a bootstrap
 // rule and grants the platform-level superadmin role when requested. It never
 // demotes an existing role. Guild-rank to application-role mapping deliberately
@@ -65,7 +112,10 @@ func (s UserStore) CreateSession(ctx context.Context, id string, userID int64, e
 
 func (s UserStore) SessionUser(ctx context.Context, id string) (domain.User, error) {
 	var u domain.User
-	err := s.pool.QueryRow(ctx, `SELECT u.id,COALESCE(u.display_name,''),i.battletag,u.app_role
+	err := s.pool.QueryRow(ctx, `WITH one_guild AS (SELECT min(id) id FROM guilds HAVING count(*)=1),
+		candidate AS (SELECT u.id,u.app_role,g.id guild_id FROM sessions s JOIN users u ON u.id=s.user_id CROSS JOIN one_guild g WHERE s.id=$1 AND s.expires_at > now()),
+		boot AS (INSERT INTO guild_memberships(guild_id,user_id,role) SELECT guild_id,id,CASE WHEN app_role IN ('admin','superadmin') THEN 'owner' ELSE app_role END FROM candidate ON CONFLICT DO NOTHING)
+		SELECT u.id,COALESCE(u.display_name,''),i.battletag,u.app_role
 		FROM sessions s
 		JOIN users u ON u.id=s.user_id
 		JOIN battle_net_identities i ON i.user_id=u.id

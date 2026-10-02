@@ -49,3 +49,30 @@ func TestSweeperRejectsNonPositiveInterval(t *testing.T) {
 		t.Fatal("sweeper did not return with a non-positive interval")
 	}
 }
+
+func TestSchedulersKeepGuildRunsIsolatedWhenTriggeredConcurrently(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first, second := New("23:59", slog.New(slog.DiscardHandler)), New("23:59", slog.New(slog.DiscardHandler))
+	runs := make(chan string, 2)
+	done := make(chan struct{}, 2)
+	go func() { first.Run(ctx, func(context.Context) { runs <- "one"; done <- struct{}{} }) }()
+	go func() { second.Run(ctx, func(context.Context) { runs <- "two"; done <- struct{}{} }) }()
+	first.Trigger()
+	second.Trigger()
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("triggered scheduler did not run")
+		}
+	}
+	close(done)
+	seen := map[string]bool{}
+	for range 2 {
+		seen[<-runs] = true
+	}
+	if !seen["one"] || !seen["two"] {
+		t.Fatalf("scheduler runs were not isolated: %v", seen)
+	}
+}

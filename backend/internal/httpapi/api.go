@@ -48,6 +48,12 @@ type API struct {
 	Auth      *auth.Manager
 	GuildSlug string
 	Trigger   Trigger
+	// ScopedTrigger/ScopedOperations/ScopedProgress are used by multi-guild
+	// deployments. The legacy fields remain as a compatibility path for the
+	// configured default guild, but are never used for another selection.
+	ScopedTrigger    func(context.Context, domain.Guild) (int64, error)
+	ScopedOperations func(domain.Guild) SyncOperations
+	ScopedProgress   func(domain.Guild) ProgressReporter
 	// Progress optionally backs GET /api/sync/progress; when nil the
 	// endpoint answers with an idle, zero-valued snapshot.
 	Progress   ProgressReporter
@@ -63,6 +69,9 @@ type API struct {
 	StaticDir string
 }
 type contextKey struct{}
+type guildContextKey struct{}
+
+const guildCookie = "apekeeper_guild"
 
 func (a API) now() time.Time {
 	if a.Now != nil {
@@ -76,13 +85,15 @@ func New(a API) http.Handler {
 	m.HandleFunc("GET /api/auth/callback", a.Auth.Callback)
 	m.Handle("POST /api/auth/logout", a.requireAuth(http.HandlerFunc(a.Auth.Logout)))
 	m.Handle("GET /api/auth/me", a.requireAuth(http.HandlerFunc(a.me)))
+	m.Handle("GET /api/guilds", a.requireAuth(http.HandlerFunc(a.guilds)))
+	m.Handle("POST /api/guilds/select", a.requireAuth(http.HandlerFunc(a.selectGuild)))
 	m.HandleFunc("GET /healthz", a.health)
 	m.HandleFunc("GET /api/healthz", a.health)
-	m.Handle("GET /api/dashboard", a.requireAuth(http.HandlerFunc(a.dashboard)))
-	m.Handle("GET /api/roster", a.requireAuth(http.HandlerFunc(a.roster)))
-	m.Handle("GET /api/roster/export", a.requireAuth(http.HandlerFunc(a.rosterExport)))
-	m.Handle("GET /api/characters/{id}", a.requireAuth(http.HandlerFunc(a.character)))
-	m.Handle("GET /api/characters/{id}/history", a.requireAuth(http.HandlerFunc(a.characterHistory)))
+	m.Handle("GET /api/dashboard", a.requireGuild(http.HandlerFunc(a.dashboard)))
+	m.Handle("GET /api/roster", a.requireGuild(http.HandlerFunc(a.roster)))
+	m.Handle("GET /api/roster/export", a.requireGuild(http.HandlerFunc(a.rosterExport)))
+	m.Handle("GET /api/characters/{id}", a.requireGuild(http.HandlerFunc(a.character)))
+	m.Handle("GET /api/characters/{id}/history", a.requireGuild(http.HandlerFunc(a.characterHistory)))
 	m.Handle("GET /api/sync/runs",
 		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
 	m.Handle("GET /api/sync/progress",
@@ -99,6 +110,11 @@ func New(a API) http.Handler {
 	m.Handle("GET /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacterMetadata)))
 	m.Handle("PUT /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacter)))
 	m.Handle("GET /api/officer/activity", a.requireRole(officer, http.HandlerFunc(a.officerActivity)))
+	m.Handle("GET /api/guild/members", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.members)))
+	m.Handle("GET /api/guild/members/search", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.memberSearch)))
+	m.Handle("POST /api/guild/members", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.inviteMember)))
+	m.Handle("PUT /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.updateMember)))
+	m.Handle("DELETE /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.removeMember)))
 	return spa(m, a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
@@ -150,10 +166,11 @@ func (a API) requireAuth(next http.Handler) http.Handler {
 	})
 }
 func (a API) requireRole(roles []string, next http.Handler) http.Handler {
-	return a.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.requireGuild(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u := r.Context().Value(contextKey{}).(domain.User)
+		membership := r.Context().Value(guildContextKey{}).(domain.GuildMembership)
 		for _, role := range roles {
-			if u.Role == role {
+			if roleAllowed(u, membership, role) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -161,7 +178,72 @@ func (a API) requireRole(roles []string, next http.Handler) http.Handler {
 		fail(w, 403, "forbidden")
 	}))
 }
+
+// roleAllowed is the single authorization rule for guild-scoped endpoints.
+// Guild roles are hierarchical: an owner retains every lower guild capability
+// while the platform superadmin bypasses guild role boundaries.
+func roleAllowed(u domain.User, membership domain.GuildMembership, required string) bool {
+	if u.Role == "superadmin" {
+		return true
+	}
+	if required == "superadmin" {
+		return false
+	}
+	levels := map[string]int{"member": 1, "officer": 2, "admin": 3, "owner": 4}
+	requiredLevel, ok := levels[required]
+	if !ok {
+		return false
+	}
+	return levels[membership.Role] >= requiredLevel
+}
+func (a API) requireGuild(next http.Handler) http.Handler {
+	return a.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := r.Context().Value(contextKey{}).(domain.User)
+		memberships, err := a.Stores.Memberships.List(r.Context(), u.ID)
+		if err != nil {
+			fail(w, 500, "guild membership lookup failed")
+			return
+		}
+		var chosen domain.GuildMembership
+		if c, e := r.Cookie(guildCookie); e == nil {
+			for _, m := range memberships {
+				if m.Guild.Slug == c.Value {
+					chosen = m
+					break
+				}
+			}
+			if chosen.Guild.ID == 0 && u.Role == "superadmin" {
+				chosen.Guild, err = a.Stores.Guilds.BySlug(r.Context(), c.Value)
+				chosen.UserID = u.ID
+				chosen.Role = "superadmin"
+			}
+		} else if a.GuildSlug != "" {
+			for _, m := range memberships {
+				if m.Guild.Slug == a.GuildSlug {
+					chosen = m
+					break
+				}
+			}
+			if chosen.Guild.ID == 0 && u.Role == "superadmin" {
+				chosen.Guild, err = a.Stores.Guilds.BySlug(r.Context(), a.GuildSlug)
+				chosen.UserID = u.ID
+				chosen.Role = "superadmin"
+			}
+		}
+		if chosen.Guild.ID == 0 && len(memberships) > 0 {
+			chosen = memberships[0]
+		}
+		if chosen.Guild.ID == 0 {
+			fail(w, 403, "guild membership required")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), guildContextKey{}, chosen)))
+	}))
+}
 func (a API) guild(ctx context.Context) (domain.Guild, error) {
+	if g, ok := ctx.Value(guildContextKey{}).(domain.GuildMembership); ok {
+		return g.Guild, nil
+	}
 	return a.Stores.Guilds.BySlug(ctx, a.GuildSlug)
 }
 func (a API) health(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +261,187 @@ func (a API) me(w http.ResponseWriter, r *http.Request) {
 		"battletag":   u.BattleTag,
 		"appRole":     u.Role,
 	})
+}
+func (a API) guilds(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(contextKey{}).(domain.User)
+	rows, err := a.Stores.Memberships.List(r.Context(), u.ID)
+	if err != nil {
+		fail(w, 500, "guild membership lookup failed")
+		return
+	}
+	if u.Role == "superadmin" {
+		all, e := a.Stores.Guilds.List(r.Context())
+		if e != nil {
+			fail(w, 500, "guild lookup failed")
+			return
+		}
+		rows = make([]domain.GuildMembership, 0, len(all))
+		for _, g := range all {
+			rows = append(rows, domain.GuildMembership{Guild: g, UserID: u.ID, Role: "superadmin"})
+		}
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, m := range rows {
+		selected := false
+		if c, e := r.Cookie(guildCookie); e == nil {
+			selected = c.Value == m.Guild.Slug
+		} else if a.GuildSlug != "" {
+			selected = a.GuildSlug == m.Guild.Slug
+		}
+		out = append(out, map[string]any{"id": m.Guild.ID, "slug": m.Guild.Slug, "name": m.Guild.Name, "realm": m.Guild.Realm, "region": m.Guild.Region, "role": m.Role, "selected": selected})
+	}
+	jsonOut(w, 200, out)
+}
+func (a API) selectGuild(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Slug string `json:"slug"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in) != nil || in.Slug == "" {
+		fail(w, 400, "guild slug is required")
+		return
+	}
+	u := r.Context().Value(contextKey{}).(domain.User)
+	rows, err := a.Stores.Memberships.List(r.Context(), u.ID)
+	if err != nil {
+		fail(w, 500, "guild membership lookup failed")
+		return
+	}
+	var found bool
+	for _, m := range rows {
+		if m.Guild.Slug == in.Slug {
+			found = true
+			break
+		}
+	}
+	if !found && u.Role != "superadmin" {
+		fail(w, 403, "guild membership required")
+		return
+	}
+	if !found {
+		if _, err = a.Stores.Guilds.BySlug(r.Context(), in.Slug); err != nil {
+			fail(w, 404, "guild not found")
+			return
+		}
+	}
+	http.SetCookie(w, &http.Cookie{Name: guildCookie, Value: in.Slug, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil})
+	jsonOut(w, 200, map[string]string{"slug": in.Slug})
+}
+func (a API) members(w http.ResponseWriter, r *http.Request) {
+	g, _ := a.guild(r.Context())
+	rows, err := a.Stores.Users.GuildMembers(r.Context(), g.ID)
+	if err != nil {
+		fail(w, 500, "member lookup failed")
+		return
+	}
+	jsonOut(w, 200, rows)
+}
+func (a API) memberSearch(w http.ResponseWriter, r *http.Request) {
+	g, _ := a.guild(r.Context())
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(query) > 120 {
+		fail(w, 400, "search query is too long")
+		return
+	}
+	rows, err := a.Stores.Users.SearchGuildCandidates(r.Context(), g.ID, query)
+	if err != nil {
+		fail(w, 500, "member search failed")
+		return
+	}
+	jsonOut(w, 200, rows)
+}
+func validMembershipRole(role string) bool {
+	return map[string]bool{"owner": true, "admin": true, "officer": true, "member": true}[role]
+}
+func membershipChangeAllowed(actor domain.GuildMembership, target domain.GuildMembership, role string) bool {
+	if actor.Role == "superadmin" {
+		return true
+	}
+	if role == "owner" && actor.Role != "owner" {
+		return false
+	}
+	if target.Role == "owner" && actor.Role != "owner" {
+		return false
+	}
+	return actor.Role == "owner" || actor.Role == "admin"
+}
+func (a API) inviteMember(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		BattleTag string `json:"battletag"`
+		Role      string `json:"role"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in) != nil || strings.TrimSpace(in.BattleTag) == "" || !validMembershipRole(in.Role) {
+		fail(w, 400, "battletag and valid membership role are required")
+		return
+	}
+	g, _ := a.guild(r.Context())
+	actor := r.Context().Value(guildContextKey{}).(domain.GuildMembership)
+	if u := r.Context().Value(contextKey{}).(domain.User); u.Role == "superadmin" {
+		actor.Role = "superadmin"
+	}
+	userID, err := a.Stores.Users.FindGuildCandidate(r.Context(), g.ID, strings.TrimSpace(in.BattleTag))
+	if err != nil {
+		fail(w, 404, "user not found or already a member")
+		return
+	}
+	if !membershipChangeAllowed(actor, domain.GuildMembership{}, in.Role) {
+		fail(w, 403, "forbidden")
+		return
+	}
+	if err = a.Stores.Memberships.Grant(r.Context(), g.ID, userID, in.Role); err != nil {
+		fail(w, 400, "could not grant membership")
+		return
+	}
+	jsonOut(w, 201, map[string]any{"userId": userID, "role": in.Role})
+}
+func (a API) updateMember(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(w, 400, "invalid member id")
+		return
+	}
+	var in struct {
+		Role string `json:"role"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in) != nil || !validMembershipRole(in.Role) {
+		fail(w, 400, "invalid membership role")
+		return
+	}
+	g, _ := a.guild(r.Context())
+	actor := r.Context().Value(guildContextKey{}).(domain.GuildMembership)
+	if u := r.Context().Value(contextKey{}).(domain.User); u.Role == "superadmin" {
+		actor.Role = "superadmin"
+	}
+	target, targetErr := a.Stores.Memberships.ForUser(r.Context(), id, g.ID)
+	if targetErr != nil || !membershipChangeAllowed(actor, target, in.Role) {
+		fail(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if err = a.Stores.Memberships.Grant(r.Context(), g.ID, id, in.Role); err != nil {
+		fail(w, 400, "could not update membership")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (a API) removeMember(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(w, 400, "invalid member id")
+		return
+	}
+	g, _ := a.guild(r.Context())
+	actor := r.Context().Value(guildContextKey{}).(domain.GuildMembership)
+	if u := r.Context().Value(contextKey{}).(domain.User); u.Role == "superadmin" {
+		actor.Role = "superadmin"
+	}
+	if target, e := a.Stores.Memberships.ForUser(r.Context(), id, g.ID); e != nil || !membershipChangeAllowed(actor, target, "member") {
+		fail(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if err = a.Stores.Memberships.Revoke(r.Context(), g.ID, id); err != nil {
+		fail(w, 400, "could not remove membership")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // parseRosterQuery validates the roster filters, sort column, and sort
@@ -691,17 +954,37 @@ func (a API) syncRuns(w http.ResponseWriter, r *http.Request) {
 // zero snapshot renders as an idle payload with the same shape.
 func (a API) syncProgress(w http.ResponseWriter, r *http.Request) {
 	var snap domain.Progress
-	if a.Progress != nil {
-		snap = a.Progress.Progress()
+	g, _ := a.guild(r.Context())
+	progress := a.Progress
+	if a.ScopedProgress != nil {
+		progress = a.ScopedProgress(g)
+	}
+	if progress != nil {
+		snap = progress.Progress()
 	}
 	jsonOut(w, 200, snap)
 }
 func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
-	if a.Trigger == nil {
+	g, _ := a.guild(r.Context())
+	trigger := a.Trigger
+	if a.ScopedTrigger != nil {
+		id, e := a.ScopedTrigger(r.Context(), g)
+		if e != nil {
+			if strings.Contains(e.Error(), "already running") {
+				fail(w, 409, "sync already running")
+			} else {
+				fail(w, 500, "could not trigger sync")
+			}
+			return
+		}
+		jsonOut(w, 202, map[string]any{"runId": id})
+		return
+	}
+	if trigger == nil || (a.GuildSlug != "" && g.Slug != a.GuildSlug) {
 		fail(w, 503, "sync unavailable")
 		return
 	}
-	id, e := a.Trigger.Trigger(r.Context())
+	id, e := trigger.Trigger(r.Context())
 	if e != nil {
 		if strings.Contains(e.Error(), "already running") {
 			fail(w, 409, "sync already running")
@@ -713,15 +996,25 @@ func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 202, map[string]any{"runId": id})
 }
 func (a API) dryRun(w http.ResponseWriter, r *http.Request) {
-	if a.Operations == nil {
+	g, _ := a.guild(r.Context())
+	operations := a.Operations
+	if a.ScopedOperations != nil {
+		operations = a.ScopedOperations(g)
+	}
+	if operations == nil || (a.ScopedOperations == nil && a.GuildSlug != "" && g.Slug != a.GuildSlug) {
 		fail(w, 503, "sync unavailable")
 		return
 	}
-	run, e := a.Operations.StartDryRun(r.Context())
+	run, e := operations.StartDryRun(r.Context())
 	a.operationResult(w, run, e)
 }
 func (a API) retrySync(w http.ResponseWriter, r *http.Request) {
-	if a.Operations == nil {
+	g, _ := a.guild(r.Context())
+	operations := a.Operations
+	if a.ScopedOperations != nil {
+		operations = a.ScopedOperations(g)
+	}
+	if operations == nil || (a.ScopedOperations == nil && a.GuildSlug != "" && g.Slug != a.GuildSlug) {
 		fail(w, 503, "sync unavailable")
 		return
 	}
@@ -730,15 +1023,20 @@ func (a API) retrySync(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid sync run id")
 		return
 	}
-	run, e := a.Operations.StartRetry(r.Context(), id)
+	run, e := operations.StartRetry(r.Context(), id)
 	a.operationResult(w, run, e)
 }
 func (a API) cancelSync(w http.ResponseWriter, r *http.Request) {
-	if a.Operations == nil {
+	g, _ := a.guild(r.Context())
+	operations := a.Operations
+	if a.ScopedOperations != nil {
+		operations = a.ScopedOperations(g)
+	}
+	if operations == nil || (a.ScopedOperations == nil && a.GuildSlug != "" && g.Slug != a.GuildSlug) {
 		fail(w, 503, "sync unavailable")
 		return
 	}
-	if e := a.Operations.Cancel(); e != nil {
+	if e := operations.Cancel(); e != nil {
 		fail(w, 409, "no sync is running")
 		return
 	}

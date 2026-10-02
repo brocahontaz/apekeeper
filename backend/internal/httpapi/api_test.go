@@ -83,6 +83,42 @@ func TestParseRosterQueryRejectsAmbiguousAndNonFiniteValues(t *testing.T) {
 	}
 }
 
+func TestMembershipChangeRoleBoundaries(t *testing.T) {
+	owner := domain.GuildMembership{Role: "owner"}
+	admin := domain.GuildMembership{Role: "admin"}
+	member := domain.GuildMembership{Role: "member"}
+	targetOwner := domain.GuildMembership{Role: "owner"}
+	if !membershipChangeAllowed(owner, member, "owner") || membershipChangeAllowed(admin, member, "owner") {
+		t.Fatal("ownership grant boundary is incorrect")
+	}
+	if membershipChangeAllowed(admin, targetOwner, "member") || !membershipChangeAllowed(owner, targetOwner, "member") {
+		t.Fatal("owner protection boundary is incorrect")
+	}
+}
+
+func TestRoleAllowedTreatsOwnerAsEveryLowerGuildRole(t *testing.T) {
+	owner := domain.GuildMembership{Role: "owner"}
+	for _, required := range []string{"member", "officer", "admin", "owner"} {
+		if !roleAllowed(domain.User{}, owner, required) {
+			t.Fatalf("owner was denied required role %q", required)
+		}
+	}
+	if roleAllowed(domain.User{}, domain.GuildMembership{Role: "officer"}, "admin") {
+		t.Fatal("officer unexpectedly satisfied admin requirement")
+	}
+	member := domain.GuildMembership{Role: "member"}
+	for _, required := range []string{"superadmin", "admin", "officer"} {
+		if roleAllowed(domain.User{}, member, required) {
+			t.Fatalf("member unexpectedly satisfied required role %q", required)
+		}
+	}
+	for _, required := range []string{"superadmin", "admin", "officer", "owner"} {
+		if !roleAllowed(domain.User{Role: "superadmin"}, domain.GuildMembership{}, required) {
+			t.Fatalf("platform superadmin was denied required role %q", required)
+		}
+	}
+}
+
 func TestParseRosterQueryRejectsUnsafeRosterFilterBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -123,6 +159,109 @@ func TestSPAFallbackUsesStaticDir(t *testing.T) {
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/roster/42", nil))
 	if r.Code != http.StatusOK || r.Body.String() != "<main>static ApeKeeper</main>" {
 		t.Fatalf("spa=%d %q", r.Code, r.Body.String())
+	}
+}
+
+func TestGuildSelectionRevalidatesMembershipAndScopesCharacters(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	stores := store.New(p)
+	one, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "switch-one", Name: "One", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "switch-two", Name: "Two", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := seedCharacter(t, ctx, stores, one.ID, "Twin", "Mage", "Arcane", time.Now())
+	second := seedCharacter(t, ctx, stores, two.ID, "Twin", "Warrior", "Arms", time.Now())
+	session := seedSession(t, ctx, p, stores, "switcher", "member", one.ID, two.ID)
+	h := New(API{Stores: stores, Auth: auth.New(oauthFake{}, stores.Users, "", []byte("test-secret")), GuildSlug: one.Slug})
+
+	// The selection endpoint checks the authenticated memberships before it
+	// issues the persistent cookie, and the cookie changes the guild-scoped API
+	// view rather than merely changing frontend state.
+	selected := requestJSON(h, http.MethodPost, "/api/guilds/select", session, []byte(`{"slug":"switch-two"}`))
+	if selected.Code != http.StatusOK || selected.Header().Get("Set-Cookie") == "" {
+		t.Fatalf("selection status=%d headers=%v body=%s", selected.Code, selected.Header(), selected.Body.String())
+	}
+	selectedCookie := selected.Result().Cookies()[0].Value
+	view := requestWithGuild(h, http.MethodGet, "/api/characters/Twin", session, selectedCookie)
+	if view.Code != http.StatusOK || decodeBody(t, view).(map[string]any)["id"] != float64(second.ID) {
+		t.Fatalf("selected guild character status=%d body=%s", view.Code, view.Body.String())
+	}
+
+	// A revoked membership cannot continue using an old selection cookie. The
+	// request is revalidated and falls back to the configured guild membership.
+	user, err := stores.Users.SessionUser(ctx, strings.Split(session, ".")[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Memberships.Revoke(ctx, two.ID, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	fallback := requestWithGuild(h, http.MethodGet, "/api/characters/Twin", session, selectedCookie)
+	if fallback.Code != http.StatusOK || decodeBody(t, fallback).(map[string]any)["id"] != float64(first.ID) {
+		t.Fatalf("revoked selection status=%d body=%s", fallback.Code, fallback.Body.String())
+	}
+	denied := requestJSON(h, http.MethodPost, "/api/guilds/select", session, []byte(`{"slug":"switch-two"}`))
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("revoked selection request status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
+func TestCharacterHTTPAccessIsDeniedAcrossGuildIDAndName(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	stores := store.New(p)
+	one, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "access-one", Name: "One", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "access-two", Name: "Two", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := seedCharacter(t, ctx, stores, one.ID, "Overlap", "Mage", "Arcane", time.Now())
+	second := seedCharacter(t, ctx, stores, two.ID, "Overlap", "Warrior", "Arms", time.Now())
+	firstOnly := seedCharacter(t, ctx, stores, one.ID, "FirstOnly", "Mage", "Fire", time.Now())
+	secondOnly := seedCharacter(t, ctx, stores, two.ID, "SecondOnly", "Warrior", "Fury", time.Now())
+	session := seedSession(t, ctx, p, stores, "access-user", "member", one.ID, two.ID)
+	h := New(API{Stores: stores, Auth: auth.New(oauthFake{}, stores.Users, "", []byte("test-secret")), GuildSlug: one.Slug})
+
+	for _, identity := range []string{intString(second.ID), intString(secondOnly.ID), "SecondOnly"} {
+		crossGuild := request(h, http.MethodGet, "/api/characters/"+identity, session)
+		if crossGuild.Code != http.StatusNotFound {
+			t.Fatalf("guild one access to %s status=%d body=%s", identity, crossGuild.Code, crossGuild.Body.String())
+		}
+	}
+	local := request(h, http.MethodGet, "/api/characters/"+intString(first.ID), session)
+	if local.Code != http.StatusOK || decodeBody(t, local).(map[string]any)["id"] != float64(first.ID) {
+		t.Fatalf("local character status=%d body=%s", local.Code, local.Body.String())
+	}
+	local = request(h, http.MethodGet, "/api/characters/Overlap", session)
+	if local.Code != http.StatusOK || decodeBody(t, local).(map[string]any)["id"] != float64(first.ID) {
+		t.Fatalf("overlapping local character status=%d body=%s", local.Code, local.Body.String())
+	}
+	selected := requestJSON(h, http.MethodPost, "/api/guilds/select", session, []byte(`{"slug":"access-two"}`))
+	if selected.Code != http.StatusOK {
+		t.Fatalf("selection status=%d body=%s", selected.Code, selected.Body.String())
+	}
+	selectedCookie := selected.Result().Cookies()[0].Value
+	for _, identity := range []string{intString(first.ID), intString(firstOnly.ID), "FirstOnly"} {
+		crossGuild := requestWithGuild(h, http.MethodGet, "/api/characters/"+identity, session, selectedCookie)
+		if crossGuild.Code != http.StatusNotFound {
+			t.Fatalf("guild two access to %s status=%d body=%s", identity, crossGuild.Code, crossGuild.Body.String())
+		}
+	}
+	local = requestWithGuild(h, http.MethodGet, "/api/characters/"+intString(second.ID), session, selectedCookie)
+	if local.Code != http.StatusOK || decodeBody(t, local).(map[string]any)["id"] != float64(second.ID) {
+		t.Fatalf("selected local character status=%d body=%s", local.Code, local.Body.String())
+	}
+	local = requestWithGuild(h, http.MethodGet, "/api/characters/Overlap", session, selectedCookie)
+	if local.Code != http.StatusOK || decodeBody(t, local).(map[string]any)["id"] != float64(second.ID) {
+		t.Fatalf("selected overlapping local character status=%d body=%s", local.Code, local.Body.String())
 	}
 }
 
@@ -231,10 +370,10 @@ func TestStoreBackedHandlers(t *testing.T) {
 
 	secret := []byte("test-secret")
 	manager := auth.New(oauthFake{}, stores.Users, "", secret)
-	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
-	member := seedSession(t, ctx, pool, stores, "member", "member")
-	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
-	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin")
+	admin := seedSession(t, ctx, pool, stores, "admin", "admin", guild.ID)
+	member := seedSession(t, ctx, pool, stores, "member", "member", guild.ID)
+	officer := seedSession(t, ctx, pool, stores, "officer", "officer", guild.ID)
+	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin", guild.ID)
 	for name, user := range map[string]string{"Alpha": "admin", "Beta": "officer"} {
 		if _, err := pool.Exec(ctx, `UPDATE characters SET user_id=(SELECT id FROM users WHERE display_name=$1) WHERE guild_id=$2 AND display_name=$3`, user, guild.ID, name); err != nil {
 			t.Fatal(err)
@@ -639,6 +778,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		emptyMember := seedSession(t, ctx, pool, stores, "empty-member", "member", empty.ID)
 		h := New(API{
 			Stores:    stores,
 			Auth:      manager,
@@ -647,7 +787,7 @@ func TestStoreBackedHandlers(t *testing.T) {
 				return now
 			},
 		})
-		r := request(h, http.MethodGet, "/api/roster/export", member)
+		r := request(h, http.MethodGet, "/api/roster/export", emptyMember)
 		if r.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 		}
@@ -686,10 +826,10 @@ func TestSyncProgressEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
-	member := seedSession(t, ctx, pool, stores, "member", "member")
-	officer := seedSession(t, ctx, pool, stores, "officer", "officer")
-	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
-	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin")
+	member := seedSession(t, ctx, pool, stores, "member", "member", guild.ID)
+	officer := seedSession(t, ctx, pool, stores, "officer", "officer", guild.ID)
+	admin := seedSession(t, ctx, pool, stores, "admin", "admin", guild.ID)
+	superadmin := seedSession(t, ctx, pool, stores, "superadmin", "superadmin", guild.ID)
 
 	// No progress source wired: the endpoint still answers for the roles the
 	// history endpoint allows, with the idle shape.
@@ -767,8 +907,8 @@ func TestSyncOperationEndpointsRequireAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
-	member := seedSession(t, ctx, pool, stores, "member", "member")
-	admin := seedSession(t, ctx, pool, stores, "admin", "admin")
+	member := seedSession(t, ctx, pool, stores, "member", "member", guild.ID)
+	admin := seedSession(t, ctx, pool, stores, "admin", "admin", guild.ID)
 	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Operations: fakeOperations{}})
 	for _, path := range []string{"/api/sync/dry-run", "/api/sync/runs/1/retry", "/api/sync/cancel"} {
 		assertStatus(t, h, http.MethodPost, path, "", http.StatusUnauthorized)
@@ -797,8 +937,8 @@ func TestOfficerEndpointsAuthorizeRolesAndScopeMetadata(t *testing.T) {
 	character := seedCharacter(t, ctx, stores, guild.ID, "Officer", "Mage", "Arcane", time.Now())
 	outsider := seedCharacter(t, ctx, stores, other.ID, "Other", "Mage", "Arcane", time.Now())
 	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
-	member := seedSession(t, ctx, pool, stores, "officer-member", "member")
-	officer := seedSession(t, ctx, pool, stores, "officer-user", "officer")
+	member := seedSession(t, ctx, pool, stores, "officer-member", "member", guild.ID)
+	officer := seedSession(t, ctx, pool, stores, "officer-user", "officer", guild.ID)
 	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug})
 	for _, path := range []string{"/api/officer/queue", "/api/officer/activity", "/api/officer/characters/" + intString(character.ID)} {
 		assertStatus(t, h, http.MethodGet, path, "", http.StatusUnauthorized)
@@ -830,7 +970,7 @@ func TestOfficerBulkValidationReportsAllInvalidTargets(t *testing.T) {
 	character := seedCharacter(t, ctx, stores, guild.ID, "Bulk", "Mage", "Arcane", time.Now())
 	outsider := seedCharacter(t, ctx, stores, other.ID, "Outsider", "Mage", "Arcane", time.Now())
 	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
-	officer := seedSession(t, ctx, pool, stores, "bulk-officer", "officer")
+	officer := seedSession(t, ctx, pool, stores, "bulk-officer", "officer", guild.ID)
 	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug})
 	body, err := json.Marshal(map[string]any{"characterIds": []int64{character.ID, outsider.ID, 999999}, "addTags": []string{"reviewed"}, "confirm": true})
 	if err != nil {
@@ -903,7 +1043,7 @@ func TestRosterResultsCoverProgressionOfficerFiltersPaginationAndExport(t *testi
 		t.Fatal(err)
 	}
 	manager := auth.New(oauthFake{}, stores.Users, "", []byte("test-secret"))
-	member := seedSession(t, ctx, p, stores, "roster-member", "member")
+	member := seedSession(t, ctx, p, stores, "roster-member", "member", guild.ID)
 	h := New(API{Stores: stores, Auth: manager, GuildSlug: guild.Slug, Now: func() time.Time { return now }})
 	if r := request(h, http.MethodGet, "/api/roster", ""); r.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated roster status=%d", r.Code)
@@ -982,7 +1122,7 @@ func seedCharacter(
 	return c
 }
 
-func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores store.Store, name, role string) string {
+func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores store.Store, name, role string, guildIDs ...int64) string {
 	t.Helper()
 	expires := time.Now().Add(time.Hour)
 	u, err := stores.Users.UpsertBattleNetUser(ctx, name, name, "", "", expires, false)
@@ -991,6 +1131,11 @@ func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores s
 	}
 	if _, err := pool.Exec(ctx, "UPDATE users SET app_role=$1 WHERE id=$2", role, u.ID); err != nil {
 		t.Fatal(err)
+	}
+	for _, guildID := range guildIDs {
+		if err := stores.Memberships.Grant(ctx, guildID, u.ID, roleToMembershipRole(role)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	id := "session-" + name
 	if err := stores.Users.CreateSession(ctx, id, u.ID, expires); err != nil {
@@ -1001,11 +1146,27 @@ func seedSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stores s
 	return id + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+func roleToMembershipRole(role string) string {
+	if role == "superadmin" {
+		return "owner"
+	}
+	return role
+}
+
 func request(h http.Handler, method, path, cookie string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, nil)
 	if cookie != "" {
 		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: cookie})
 	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func requestWithGuild(h http.Handler, method, path, session, guild string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, nil)
+	r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: session})
+	r.AddCookie(&http.Cookie{Name: guildCookie, Value: guild})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
