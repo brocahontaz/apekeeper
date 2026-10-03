@@ -684,6 +684,46 @@ func TestTrendsByGuildUsesLatestDailySnapshotsAndAggregatesRaids(t *testing.T) {
 	}
 }
 
+func TestTrendsByGuildIgnoresMalformedRaidProgressCounts(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "trends-malformed-progress", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+		GuildID: g.ID, Name: "Malformed", DisplayName: "Malformed", NormalizedName: "malformed",
+		Realm: "Area 52", RealmSlug: "area-52", Region: "us", SyncedAt: now,
+	}, []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := []byte(`{"expansions":[{"instances":[{"instance":{"name":"Vault"},"modes":[
+		{"difficulty":{"name":"Normal"},"progress":{}},
+		{"difficulty":{"name":"Heroic"},"progress":{"completed_count":"","total_count":""}},
+		{"difficulty":{"name":"Mythic"},"progress":null},
+		{"difficulty":{"name":"LFR"},"progress":{"completed_count":"999999999999999999999999","total_count":"also-not-a-count"}}
+	]}]}]}`)
+	if err := s.Progression.InsertSnapshot(ctx, domain.Snapshot{CharacterID: c.ID, CapturedAt: now, RaidProgress: progress}); err != nil {
+		t.Fatal(err)
+	}
+
+	trends, err := s.Characters.TrendsByGuild(ctx, g.ID, now.AddDate(0, 0, -1), now, now.Add(-7*24*time.Hour), 31)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trends) != 1 || len(trends[0].RaidProgress) != 4 {
+		t.Fatalf("trends=%+v, want one trend with four raid rows", trends)
+	}
+	for _, raid := range trends[0].RaidProgress {
+		if raid.Progress != 0 || raid.TotalBosses != 0 {
+			t.Errorf("raid %q/%q = %d/%d, want 0/0", raid.RaidName, raid.Difficulty, raid.Progress, raid.TotalBosses)
+		}
+	}
+}
+
 func TestDeleteExpiredSessionsRemovesOnlyExpiredSessions(t *testing.T) {
 	ctx := context.Background()
 	p, _ := testdb.New(t)
