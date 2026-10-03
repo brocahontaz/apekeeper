@@ -21,6 +21,6 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: { proxy: { "/api": apiProxyTarget, "/healthz": apiProxyTarget } },
-    test: { environment: "jsdom" },
+    test: { environment: "jsdom", exclude: ["e2e/**", "node_modules/**"] },
   };
 });

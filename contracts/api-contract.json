@@ -1,0 +1,13 @@
+{
+  "models": {
+    "User": {"required": {"id":"integer","displayName":"string","battletag":"string","appRole":"string"}},
+    "Guild": {"required": {"id":"integer","slug":"string","name":"string","realm":"string","region":"string","role":"string"}, "optional":{"selected":"boolean"}},
+    "Character": {"required": {"id":"integer","name":"string","realm":"string","classId":"integer","className":"string","specId":"integer","specName":"string","level":"integer","itemLevel":"number","mythicRating":"number","bestKeyLevel":"integer","stale":"boolean"}, "optional":{"role":"string","guildRank":"integer","raceName":"string","gender":"string","avatarUrl":"string","syncedAt":"string"}},
+    "Snapshot": {"required": {"id":"integer","characterId":"integer","capturedAt":"string","itemLevel":"number","mythicRating":"number","bestKeyLevel":"integer"}},
+    "History": {"required": {"from":"string","to":"string","retentionDays":"integer","snapshots":"array","comparison":"nullable"}},
+    "RosterPage": {"required": {"items":"array","total":"integer","page":"integer","pageSize":"integer","classes":"array","specs":"array"}},
+    "SyncRun": {"required": {"id":"integer","guildId":"integer","startedAt":"string","finishedAt":"nullable","trigger":"string","status":"string","total":"integer","updated":"integer","failed":"integer","errorSummary":"string","detail":"object"}, "optional":{"notifyStatus":"nullable"}},
+    "SyncProgress": {"required": {"active":"boolean","runId":"integer","status":"string","phase":"string","total":"integer","updated":"integer","failed":"integer","startedAt":"string","dryRun":"boolean"}},
+    "Dashboard": {"required": {"rosterSize":"integer","maxLevelMembers":"integer","activeMembers":"integer","classDistribution":"array","mythicPlus":"object","raidProgression":"array","staleCharacters":"object","notableChanges":"array","trends":"array"}}
+  }
+}

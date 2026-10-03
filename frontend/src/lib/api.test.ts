@@ -15,6 +15,26 @@ describe("api", () => {
     await expect(api("/api/dashboard")).rejects.toBeInstanceOf(ApiError);
     expect(get(sessionExpired)).toBe(true);
   });
+  it("preserves the stable API error code and correlation id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ code: "invalid_request", message: "bad filter", requestId: "r-1" }),
+          {
+            status: 400,
+            headers: { "X-Request-ID": "r-1" },
+          },
+        ),
+      ),
+    );
+    await expect(api("/api/roster")).rejects.toMatchObject({
+      status: 400,
+      message: "bad filter",
+      code: "invalid_request",
+      requestId: "r-1",
+    });
+  });
   it("navigates to /login via popstate and clears user on 401", async () => {
     window.history.replaceState({}, "", "/");
     currentUser.set({ id: 1, displayName: "x", battletag: "x#1", appRole: "member" });

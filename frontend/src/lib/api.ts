@@ -168,6 +168,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code = "unknown",
+    public requestId?: string,
   ) {
     super(message);
   }
@@ -192,10 +194,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     let message = response.statusText;
+    let code = "unknown";
+    let requestId = response.headers.get("X-Request-ID") ?? undefined;
     try {
-      message = (await response.json()).error || message;
+      const body = await response.json();
+      message = body.message || body.error || message;
+      code = body.code || code;
+      requestId = body.requestId || requestId;
     } catch {}
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, code, requestId);
   }
   return response.status === 204 ? (undefined as T) : response.json();
 }

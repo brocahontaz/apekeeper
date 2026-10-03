@@ -381,57 +381,7 @@ func (s CharacterStore) ListPageByGuild(ctx context.Context, guildID int64, f Ch
 // progression_snapshots INDEX(character_id,captured_at) already give every
 // CTE a character-leading index to aggregate through.
 func (s CharacterStore) DashboardByGuild(ctx context.Context, guildID int64, since time.Time) ([]DashboardCharacter, error) {
-	rows, e := s.pool.Query(ctx, `WITH guild_chars AS (
-			SELECT id FROM characters WHERE guild_id=$1
-		),
-		mythic AS (
-			SELECT m.character_id,
-				MAX(m.overall_rating) AS best_rating,
-				(array_agg(m.best_key_level ORDER BY m.overall_rating DESC,m.best_key_level DESC))[1] AS best_key
-			FROM mythic_plus m
-			JOIN guild_chars gc ON gc.id=m.character_id
-			GROUP BY m.character_id
-		),
-		raids AS (
-			SELECT r.character_id,
-				array_agg(r ORDER BY r.raid_slug,r.raid_name,r.difficulty) AS raid_rows
-			FROM raid_progression r
-			JOIN guild_chars gc ON gc.id=r.character_id
-			GROUP BY r.character_id
-		),
-		snaps AS (
-			SELECT p.character_id,
-				COUNT(*) AS cnt,
-				(array_agg(p ORDER BY p.captured_at))[1] AS first_snap,
-				(array_agg(p ORDER BY p.captured_at DESC))[1] AS last_snap
-			FROM progression_snapshots p
-			JOIN guild_chars gc ON gc.id=p.character_id
-			WHERE p.captured_at >= $2
-			GROUP BY p.character_id
-		)
-		SELECT
-			c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
-			COALESCE(c.class_id,0),COALESCE(c.class_name,''),
-			COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
-			COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
-			COALESCE(c.race_name,''),COALESCE(c.gender,''),
-			COALESCE(my.best_rating,0),
-			COALESCE(my.best_key,0),
-			COALESCE(c.synced_at,'epoch'),
-			COALESCE(rx.raid_slug,''),COALESCE(rx.raid_name,''),COALESCE(rx.difficulty,''),
-			COALESCE(rx.progress,0),COALESCE(rx.total_bosses,0),
-			COALESCE(sn.cnt,0),
-			COALESCE((sn.first_snap).captured_at,'epoch'),COALESCE((sn.first_snap).item_level,0),COALESCE((sn.first_snap).mythic_rating,0),
-			COALESCE((sn.last_snap).captured_at,'epoch'),COALESCE((sn.last_snap).item_level,0),COALESCE((sn.last_snap).mythic_rating,0)
-		FROM characters c
-		LEFT JOIN mythic my ON my.character_id=c.id
-		LEFT JOIN raids rd ON rd.character_id=c.id
-		LEFT JOIN snaps sn ON sn.character_id=c.id
-		-- The raid array expands after every aggregate has been attached, so
-		-- characters without raids survive the LEFT JOIN with a NULL composite.
-		LEFT JOIN LATERAL unnest(rd.raid_rows) AS rx ON true
-		WHERE c.guild_id=$1
-		ORDER BY c.display_name,c.id`, guildID, since)
+	rows, e := s.pool.Query(ctx, DashboardQuery, guildID, since)
 	if e != nil {
 		return nil, e
 	}
@@ -577,30 +527,12 @@ func (s CharacterStore) listByGuild(ctx context.Context, guildID int64, f Charac
 	}
 	whereClause := strings.Join(where, " AND ")
 	var total int
-	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM characters c LEFT JOIN users u ON u.id=c.user_id WHERE "+whereClause, args...).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, RosterCountQuery(whereClause), args...).Scan(&total); err != nil {
 		return CharacterPage{}, err
 	}
-	q := `SELECT
-		c.id,c.guild_id,c.name,c.display_name,c.normalized_name,c.realm,c.realm_slug,c.region,
-		COALESCE(c.class_id,0),COALESCE(c.class_name,''),
-		COALESCE(c.spec_id,0),COALESCE(c.spec_name,''),
-		COALESCE(c.level,0),COALESCE(c.item_level,0),COALESCE(c.guild_rank,0),
-		COALESCE(c.race_name,''),COALESCE(c.gender,''),
-		COALESCE(u.app_role,'member'),
-		COALESCE((SELECT MAX(overall_rating) FROM mythic_plus m WHERE m.character_id=c.id),0),
-		COALESCE((SELECT MAX(best_key_level) FROM mythic_plus m WHERE m.character_id=c.id),0),
-		COALESCE(c.synced_at,'epoch')
-		FROM characters c LEFT JOIN users u ON u.id=c.user_id
-		WHERE ` + whereClause + " ORDER BY " + sort.SQL()
-	if descending {
-		q += " DESC"
-	} else {
-		q += " ASC"
-	}
-	q += ", c.display_name ASC, c.id ASC"
+	q := RosterSelectQuery(whereClause, sort, descending, len(args), limit > 0)
 	if limit > 0 {
 		args = append(args, limit, offset)
-		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	}
 	rows, e := s.pool.Query(ctx, q, args...)
 	if e != nil {

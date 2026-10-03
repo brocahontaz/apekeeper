@@ -49,6 +49,9 @@ jobs:
           DATABASE_URL: postgres://apekeeper:apekeeper@localhost:5432/apekeeper?sslmode=disable
         run: cd backend && go test ./... -count=1
 
+      - name: Migration and API contract checks
+        run: make migrate-check api-contract
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -66,8 +69,17 @@ jobs:
       - name: Check
         run: cd frontend && npm run check
 
+      - name: Check formatting
+        run: cd frontend && npm run format:check
+
       - name: Test
         run: cd frontend && npm run test
+
+      - name: Browser dependencies
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Browser E2E
+        run: cd frontend && npm run e2e
 
       - name: Build
         run: cd frontend && npm run build
