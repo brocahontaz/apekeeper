@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { match, navigate, type Route } from "$lib/router";
   import { client } from "$lib/api";
-  import { currentUser } from "$lib/stores";
+  import { currentUser, effectiveRole, selectedGuildRole } from "$lib/stores";
   import Logo from "$components/Logo.svelte";
   import ThemeToggle from "$components/ThemeToggle.svelte";
   import Dashboard from "$routes/Dashboard.svelte";
@@ -37,6 +37,7 @@
     tick;
     return match(routes);
   });
+  let role = $derived(effectiveRole($currentUser, $selectedGuildRole));
   const routeLabel = (path: string) =>
     ({
       "/": "The Enclosure",
@@ -63,6 +64,7 @@
           guilds = items;
           confirmedGuild = items.find((item) => item.selected)?.slug ?? items[0]?.slug ?? "";
           selectedGuild = confirmedGuild;
+          selectedGuildRole.set(items.find((item) => item.slug === confirmedGuild)?.role ?? null);
         });
       })
       .then(() => {
@@ -134,11 +136,11 @@
                 >{/if}
               {$currentUser.battletag}
               <b
-                >{$currentUser.appRole === "superadmin"
+                >{role === "superadmin"
                   ? "Super Admin"
-                  : $currentUser.appRole === "admin"
+                  : role === "admin"
                     ? "Guild Master"
-                    : $currentUser.appRole === "officer"
+                    : role === "officer"
                       ? "Officer"
                       : "Ape"}</b
               > <button onclick={logout}>Logout</button></span

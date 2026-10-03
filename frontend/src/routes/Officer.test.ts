@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import Officer from "$routes/Officer.svelte";
-import { currentUser } from "$lib/stores";
+import { currentUser, selectedGuildRole } from "$lib/stores";
 
 const response = (body: unknown) =>
   Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
@@ -22,6 +22,7 @@ describe("Officer workflow", () => {
     if (component) unmount(component);
     host.remove();
     currentUser.set(null);
+    selectedGuildRole.set(null);
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -34,6 +35,14 @@ describe("Officer workflow", () => {
     flushSync();
     expect(host.textContent).toContain("No characters need review.");
     expect(host.querySelector("[aria-live='polite']")).not.toBeNull();
+  });
+  it("hides officer workflow for a member of the selected guild", async () => {
+    currentUser.set({ id: 1, displayName: "Admin elsewhere", battletag: "a#1", appRole: "admin" });
+    selectedGuildRole.set("member");
+    component = mount(Officer, { target: host });
+    flushSync();
+    expect(host.textContent).toContain("Officer access is required.");
+    expect(host.querySelector("button")).toBeNull();
   });
   it("confirms and submits bounded bulk review actions", async () => {
     const fetch = vi.fn((path: string, init?: RequestInit) =>
