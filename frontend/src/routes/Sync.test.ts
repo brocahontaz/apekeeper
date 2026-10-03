@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import Sync from "$routes/Sync.svelte";
-import { currentUser } from "$lib/stores";
+import { currentUser, selectedGuildRole } from "$lib/stores";
 import type { SyncProgress, SyncRun } from "$lib/api";
 
 const runningRun: SyncRun = {
@@ -68,6 +68,7 @@ describe("Sync live progress", () => {
     unmount(component);
     host.remove();
     currentUser.set(null);
+    selectedGuildRole.set(null);
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -130,5 +131,19 @@ describe("Sync live progress", () => {
     await vi.advanceTimersByTimeAsync(1500);
     expect(progressCalls).toBe(0);
     expect(host.textContent).not.toContain("Expedition in progress");
+  });
+
+  it("uses the selected guild role instead of the global app role", async () => {
+    currentUser.set({ id: 1, displayName: "member", battletag: "member#1", appRole: "admin" });
+    selectedGuildRole.set("member");
+    vi.stubGlobal("fetch", (path: string) =>
+      Promise.resolve(jsonResponse(path === "/api/sync/runs" ? [] : {})),
+    );
+    component = mount(Sync, { target: host });
+    await vi.advanceTimersByTimeAsync(0);
+    flushSync();
+    expect(host.textContent).toContain("Trigger restricted to Guild Master");
+    expect(host.textContent).toContain("Run history is sealed");
+    expect(host.querySelector("button.gold")).toBeNull();
   });
 });

@@ -36,7 +36,11 @@ func health(p db.Pinger) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "db": dbStatus})
+		overall := "ok"
+		if status != http.StatusOK {
+			overall = "degraded"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": overall, "db": dbStatus})
 	}
 }
 

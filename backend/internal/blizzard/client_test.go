@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,16 @@ import (
 
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 )
+
+type trackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
+}
 
 func TestLimiterWaitsForRefill(t *testing.T) {
 	l := NewLimiter(1, 1, 20*time.Millisecond)
@@ -51,6 +62,57 @@ func TestRequestRetries429(t *testing.T) {
 	}
 	if attempts != 2 || out.OK != "yes" {
 		t.Fatalf("attempts=%d output=%q", attempts, out.OK)
+	}
+}
+
+func TestRequestClosesRetryBodiesPromptly(t *testing.T) {
+	firstBody := &trackingBody{Reader: strings.NewReader("busy")}
+	attempts := 0
+	c := NewClient("us", "en_US", "", "", "")
+	defer c.limiter.Close()
+	c.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: firstBody}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":"yes"}`))}, nil
+	})}
+	var out struct {
+		OK string `json:"ok"`
+	}
+	if err := c.request(context.Background(), http.MethodGet, "http://blizzard.test", "", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !firstBody.closed {
+		t.Fatal("retry response body was not closed before the next attempt")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRequestBackoffHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hit := make(chan struct{})
+	c := NewClient("us", "en_US", "", "", "")
+	defer c.limiter.Close()
+	c.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(hit)
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("down"))}, nil
+	})}
+	done := make(chan error, 1)
+	go func() { done <- c.request(ctx, http.MethodGet, "http://blizzard.test", "", nil, &struct{}{}) }()
+	<-hit
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("error=%v, want context canceled", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("request did not stop during backoff")
 	}
 }
 

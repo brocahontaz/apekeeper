@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import App from "./App.svelte";
-import { currentUser } from "$lib/stores";
+import { currentUser, selectedGuildRole } from "$lib/stores";
 import { navigate } from "$lib/router";
 
 const historyPayload = {
@@ -38,6 +38,7 @@ describe("App resilience and navigation", () => {
     if (component) unmount(component);
     host?.remove();
     currentUser.set(null);
+    selectedGuildRole.set(null);
     history.replaceState({}, "", "/");
     vi.unstubAllGlobals();
   });
@@ -165,5 +166,41 @@ describe("App resilience and navigation", () => {
       expect(host.querySelector('[role="alert"]')?.textContent).toContain("switch unavailable"),
     );
     expect(select.value).toBe("one");
+  });
+
+  it("displays the selected guild membership role", async () => {
+    history.replaceState({}, "", "/");
+    vi.stubGlobal("fetch", (input: string) => {
+      if (input === "/api/auth/me")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ id: 1, displayName: "Keeper", battletag: "k#1", appRole: "admin" }),
+          ),
+        );
+      if (input === "/api/guilds")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                slug: "one",
+                name: "One",
+                realm: "A",
+                region: "us",
+                role: "officer",
+                selected: true,
+              },
+            ]),
+          ),
+        );
+      if (input === "/api/dashboard")
+        return Promise.resolve(new Response(JSON.stringify({ rosterSize: 0 })));
+      return Promise.resolve(new Response(JSON.stringify({})));
+    });
+    host = document.createElement("div");
+    document.body.append(host);
+    component = mount(App, { target: host });
+    await vi.waitFor(() => expect(host.textContent).toContain("Officer"));
+    expect(host.textContent).not.toContain("Guild Master");
   });
 });

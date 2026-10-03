@@ -285,10 +285,10 @@ func (a API) guild(ctx context.Context) (domain.Guild, error) {
 }
 func (a API) health(w http.ResponseWriter, r *http.Request) {
 	if a.Ping != nil && a.Ping.Ping(r.Context()) != nil {
-		jsonOut(w, 503, map[string]string{"status": "ok", "db": "degraded"})
+		jsonOut(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "db": "degraded"})
 		return
 	}
-	jsonOut(w, 200, map[string]string{"status": "ok", "db": "ok"})
+	jsonOut(w, http.StatusOK, map[string]string{"status": "ok", "db": "ok"})
 }
 func (a API) readiness(w http.ResponseWriter, r *http.Request) {
 	components := map[string]string{"db": "ok"}

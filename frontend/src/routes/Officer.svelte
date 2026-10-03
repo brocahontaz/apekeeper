@@ -1,6 +1,6 @@
 <script lang="ts">
   import { client, type OfficerActivity, type OfficerQueueItem } from "$lib/api";
-  import { currentUser } from "$lib/stores";
+  import { currentUser, effectiveRole, selectedGuildRole } from "$lib/stores";
   import { onDestroy } from "svelte";
   let items = $state<OfficerQueueItem[]>([]),
     activity = $state<OfficerActivity[]>([]),
@@ -27,7 +27,9 @@
     mutationGeneration++;
     mutationVersion++;
   });
-  let allowed = $derived($currentUser?.appRole !== "member" && !!$currentUser);
+  let allowed = $derived(
+    !!$currentUser && effectiveRole($currentUser, $selectedGuildRole) !== "member",
+  );
   $effect(() => {
     if (allowed) load();
     else loading = false;

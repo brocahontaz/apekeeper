@@ -106,11 +106,13 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 			if i == MaxAttempts-1 {
 				return e
 			}
-			time.Sleep(Backoff(i))
+			if err := waitBackoff(ctx, Backoff(i)); err != nil {
+				return err
+			}
 			continue
 		}
-		defer res.Body.Close()
 		if res.StatusCode == 404 {
+			_ = res.Body.Close()
 			return &NotFoundError{u}
 		}
 		if res.StatusCode == 429 || res.StatusCode >= 500 {
@@ -120,18 +122,36 @@ func (c *Client) request(ctx context.Context, method, u, namespace string, body 
 			}
 			c.logFailedAttempt(method, logPath, i+1, "status", res.StatusCode)
 			if i == MaxAttempts-1 {
+				_ = res.Body.Close()
 				return fmt.Errorf("Blizzard HTTP %d", res.StatusCode)
 			}
-			time.Sleep(d)
+			_ = res.Body.Close()
+			if err := waitBackoff(ctx, d); err != nil {
+				return err
+			}
 			continue
 		}
 		if res.StatusCode/100 != 2 {
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+			_ = res.Body.Close()
 			return fmt.Errorf("Blizzard HTTP %d: %s", res.StatusCode, b)
 		}
-		return json.NewDecoder(res.Body).Decode(out)
+		err := json.NewDecoder(res.Body).Decode(out)
+		_ = res.Body.Close()
+		return err
 	}
 	return errors.New("Blizzard retries exhausted")
+}
+
+func waitBackoff(ctx context.Context, delay time.Duration) error {
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // logFailedAttempt records a retried HTTP failure at Debug level.

@@ -27,6 +27,10 @@ import (
 
 type oauthFake struct{}
 
+type healthPinger struct{ err error }
+
+func (p healthPinger) Ping(context.Context) error { return p.err }
+
 func (oauthFake) AuthorizationURL(_, _ string) string {
 	return ""
 }
@@ -277,6 +281,25 @@ func TestHealthz(t *testing.T) {
 		t.Fatal(err)
 	}
 	if body["status"] != "ok" || body["db"] != "ok" {
+		t.Fatalf("body=%v", body)
+	}
+}
+
+func TestHealthzReportsDegradedDatabase(t *testing.T) {
+	h := New(API{
+		Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")),
+		Ping: healthPinger{err: errors.New("database unavailable")},
+	})
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if r.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "degraded" || body["db"] != "degraded" {
 		t.Fatalf("body=%v", body)
 	}
 }

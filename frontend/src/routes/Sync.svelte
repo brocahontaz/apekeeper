@@ -2,7 +2,7 @@
   import { client, ApiError, type SyncProgress, type SyncRun } from "$lib/api";
   import { onDestroy } from "svelte";
   import { relativeTime } from "$lib/format";
-  import { currentUser } from "$lib/stores";
+  import { currentUser, effectiveRole, selectedGuildRole } from "$lib/stores";
   import {
     canTriggerSync,
     canViewRuns as canViewRunsFor,
@@ -21,7 +21,7 @@
   let progress = $state<SyncProgress | null>(null);
   let polling = $state(false);
   let completionAnnouncement = $state("");
-  let role = $derived($currentUser?.appRole);
+  let role = $derived(effectiveRole($currentUser, $selectedGuildRole));
   let canTrigger = $derived(canTriggerSync(role));
   let canViewRuns = $derived(canViewRunsFor(role));
   let canViewProgress = $derived(canViewProgressFor(role));

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,17 @@ func TestHealth(t *testing.T) {
 		health(tc.p).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		if r.Code != tc.code {
 			t.Fatalf("code %d", r.Code)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		want := "ok"
+		if tc.code == http.StatusServiceUnavailable {
+			want = "degraded"
+		}
+		if body["status"] != want {
+			t.Fatalf("status=%q, want %q", body["status"], want)
 		}
 	}
 }
