@@ -318,9 +318,9 @@ func (s CharacterStore) TrendsByGuild(ctx context.Context, guildID int64, from, 
 					THEN (mode->'progress'->>'total_count')::int ELSE 0 END
 				ELSE 0 END) AS total_bosses
 		FROM latest l
-		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.raid_progress,'[]'::jsonb)->'expansions') expansion
-		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(expansion->'instances','[]'::jsonb)) instance
-		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(instance->'modes','[]'::jsonb)) mode
+		CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(l.raid_progress->'expansions') = 'array' THEN l.raid_progress->'expansions' ELSE '[]'::jsonb END) expansion
+		CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(expansion->'instances') = 'array' THEN expansion->'instances' ELSE '[]'::jsonb END) instance
+		CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(instance->'modes') = 'array' THEN instance->'modes' ELSE '[]'::jsonb END) mode
 		WHERE COALESCE(instance->'instance'->>'name','') <> '' AND COALESCE(mode->'difficulty'->>'name','') <> ''
 		GROUP BY l.captured_at,instance->'instance'->>'name',mode->'difficulty'->>'name'
 	), raids AS (

@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -721,6 +722,42 @@ func TestTrendsByGuildIgnoresMalformedRaidProgressCounts(t *testing.T) {
 		if raid.Progress != 0 || raid.TotalBosses != 0 {
 			t.Errorf("raid %q/%q = %d/%d, want 0/0", raid.RaidName, raid.Difficulty, raid.Progress, raid.TotalBosses)
 		}
+	}
+}
+
+func TestTrendsByGuildIgnoresNonArrayRaidProgressFields(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	s := store.New(p)
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	g, err := s.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "trends-non-array-progress", Name: "Ape", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, progress := range [][]byte{
+		[]byte(`{"expansions":null}`),
+		[]byte(`{"expansions":[{"instances":null}]}`),
+		[]byte(`{"expansions":[{"instances":[{"modes":null}]}]}`),
+	} {
+		name := "Malformed" + strconv.Itoa(i)
+		c, err := s.Characters.UpsertByGuildIdentity(ctx, domain.Character{
+			GuildID: g.ID, Name: name, DisplayName: name, NormalizedName: strings.ToLower(name),
+			Realm: "Area 52", RealmSlug: "area-52", Region: "us", SyncedAt: now,
+		}, []byte("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Progression.InsertSnapshot(ctx, domain.Snapshot{CharacterID: c.ID, CapturedAt: now, RaidProgress: progress}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	trends, err := s.Characters.TrendsByGuild(ctx, g.ID, now.AddDate(0, 0, -1), now, now.Add(-7*24*time.Hour), 31)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trends) != 1 || len(trends[0].RaidProgress) != 0 {
+		t.Fatalf("trends=%+v, want one trend without raid rows", trends)
 	}
 }
 
