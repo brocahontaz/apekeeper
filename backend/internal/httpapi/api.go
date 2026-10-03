@@ -47,10 +47,11 @@ type SyncOperations interface {
 }
 
 type API struct {
-	Stores    store.Store
-	Auth      *auth.Manager
-	GuildSlug string
-	Trigger   Trigger
+	Stores      store.Store
+	Auth        *auth.Manager
+	GuildSlug   string
+	Trigger     Trigger
+	trendLookup func(context.Context, int64, time.Time, time.Time, time.Time, int) ([]store.GuildTrend, error)
 	// ScopedTrigger/ScopedOperations/ScopedProgress are used by multi-guild
 	// deployments. The legacy fields remain as a compatibility path for the
 	// configured default guild, but are never used for another selection.
@@ -92,6 +93,12 @@ func (a API) now() time.Time {
 		return a.Now()
 	}
 	return time.Now()
+}
+func (a API) trends(ctx context.Context, guildID int64, from, to, staleBefore time.Time, limit int) ([]store.GuildTrend, error) {
+	if a.trendLookup != nil {
+		return a.trendLookup(ctx, guildID, from, to, staleBefore, limit)
+	}
+	return a.Stores.Characters.TrendsByGuild(ctx, guildID, from, to, staleBefore, limit)
 }
 func New(a API) http.Handler {
 	m := http.NewServeMux()
@@ -1010,10 +1017,9 @@ func (a API) dashboard(w http.ResponseWriter, r *http.Request) {
 	if rated > 0 {
 		average = ratingTotal / float64(rated)
 	}
-	trends, e := a.Stores.Characters.TrendsByGuild(r.Context(), g.ID, a.now().AddDate(0, 0, -30), a.now(), a.now().Add(-7*24*time.Hour), 31)
+	trends, e := a.trends(r.Context(), g.ID, a.now().AddDate(0, 0, -30), a.now(), a.now().Add(-7*24*time.Hour), 31)
 	if e != nil {
-		fail(w, 500, "trend lookup failed")
-		return
+		trends = []store.GuildTrend{}
 	}
 	jsonOut(w, 200, map[string]any{
 		"rosterSize":        len(chars),

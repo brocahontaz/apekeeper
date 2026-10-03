@@ -553,6 +553,30 @@ func TestStoreBackedHandlers(t *testing.T) {
 			}
 		}
 	})
+	t.Run("dashboard retains overview when trend lookup fails", func(t *testing.T) {
+		withoutTrends := New(API{
+			Stores:    stores,
+			Auth:      manager,
+			GuildSlug: guild.Slug,
+			Now: func() time.Time {
+				return now
+			},
+			trendLookup: func(context.Context, int64, time.Time, time.Time, time.Time, int) ([]store.GuildTrend, error) {
+				return nil, errors.New("trend database error")
+			},
+		})
+		r := request(withoutTrends, http.MethodGet, "/api/dashboard", member)
+		if r.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+		}
+		body := decodeBody(t, r).(map[string]any)
+		if body["rosterSize"] != float64(3) || body["classDistribution"] == nil || body["mythicPlus"] == nil || body["raidProgression"] == nil || body["staleCharacters"] == nil || body["notableChanges"] == nil {
+			t.Fatalf("dashboard=%v, want overview panels", body)
+		}
+		if trends := body["trends"].([]any); len(trends) != 0 {
+			t.Fatalf("trends=%v, want empty fallback", trends)
+		}
+	})
 	t.Run("roster export streams csv", func(t *testing.T) {
 		assertStatus(t, h, http.MethodGet, "/api/roster/export", "", http.StatusUnauthorized)
 		r := request(h, http.MethodGet, "/api/roster/export", member)
