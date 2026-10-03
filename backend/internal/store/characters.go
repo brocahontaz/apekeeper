@@ -309,8 +309,14 @@ func (s CharacterStore) TrendsByGuild(ctx context.Context, guildID int64, from, 
 	), raid_rows AS (
 		SELECT l.captured_at,instance->'instance'->>'name' AS raid_name,
 			mode->'difficulty'->>'name' AS difficulty,
-			MAX(COALESCE((mode->'progress'->>'completed_count')::int,0)) AS progress,
-			MAX(COALESCE((mode->'progress'->>'total_count')::int,0)) AS total_bosses
+			MAX(CASE WHEN mode->'progress'->>'completed_count' ~ '^-?[0-9]+$' THEN
+				CASE WHEN (mode->'progress'->>'completed_count')::numeric BETWEEN -2147483648 AND 2147483647
+					THEN (mode->'progress'->>'completed_count')::int ELSE 0 END
+				ELSE 0 END) AS progress,
+			MAX(CASE WHEN mode->'progress'->>'total_count' ~ '^-?[0-9]+$' THEN
+				CASE WHEN (mode->'progress'->>'total_count')::numeric BETWEEN -2147483648 AND 2147483647
+					THEN (mode->'progress'->>'total_count')::int ELSE 0 END
+				ELSE 0 END) AS total_bosses
 		FROM latest l
 		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.raid_progress,'[]'::jsonb)->'expansions') expansion
 		CROSS JOIN LATERAL jsonb_array_elements(COALESCE(expansion->'instances','[]'::jsonb)) instance
