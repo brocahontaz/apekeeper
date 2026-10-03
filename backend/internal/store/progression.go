@@ -16,11 +16,7 @@ type ProgressionStore struct{ pool *pgxpool.Pool }
 // intentional: it makes the guild boundary part of the history query rather
 // than relying on a caller having checked it separately.
 func (s ProgressionStore) History(ctx context.Context, guildID, characterID int64, from, to time.Time, limit int) ([]domain.Snapshot, error) {
-	rows, err := s.pool.Query(ctx, `SELECT p.id,p.character_id,p.captured_at,
-		COALESCE(p.item_level,0),COALESCE(p.mythic_rating,0),COALESCE(p.best_key_level,0),COALESCE(p.raid_progress,'[]')
-		FROM progression_snapshots p JOIN characters c ON c.id=p.character_id
-		WHERE c.guild_id=$1 AND p.character_id=$2 AND p.captured_at >= $3 AND p.captured_at <= $4
-		ORDER BY p.captured_at DESC,p.id DESC LIMIT $5`, guildID, characterID, from, to, limit)
+	rows, err := s.pool.Query(ctx, HistoryQuery, guildID, characterID, from, to, limit)
 	if err != nil {
 		return nil, err
 	}

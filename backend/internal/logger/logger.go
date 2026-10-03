@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,18 @@ import (
 	"strings"
 	"time"
 )
+
+type requestIDContextKey struct{}
+
+// WithRequestID carries only the non-secret correlation identifier through
+// backend work; it is safe to include in structured logs and metrics labels.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDContextKey{}, id)
+}
+func RequestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDContextKey{}).(string)
+	return id
+}
 
 func New(level string) *slog.Logger {
 	var l slog.Level
@@ -97,6 +110,11 @@ func RequestLog(next http.Handler, log *slog.Logger) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		log.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration", time.Since(s).String())
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = RequestID(r.Context())
+		}
+		elapsed := time.Since(s)
+		log.Info("request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "status", status, "duration", elapsed.String(), "duration_ms", elapsed.Milliseconds(), "error", status >= 400)
 	})
 }

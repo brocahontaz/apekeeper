@@ -84,7 +84,26 @@ A daily cleanup sweeper deletes progression snapshots older than `SNAPSHOT_RETEN
 make test
 make check
 cd frontend && npm run test && npm run build
+cd frontend && npx playwright install chromium && npm run e2e
+make migrate-check api-contract
 ```
+
+`openapi/openapi.json` is the checked-in integration contract. It covers the
+authenticated and public HTTP surface, role requirements, bounded query
+parameters, CSV export, and compatibility fields. `make api-contract` performs
+a dependency-free CI validation so the document cannot become malformed.
+Backend errors retain the legacy `error` string and status code while also
+returning stable `code`, `message`, and `requestId` fields. Request logs use the
+same correlation ID and contain only structured, redacted diagnostics.
+
+For deterministic local development, backend integration tests use the
+PostgreSQL service from `docker compose up -d db` and frontend tests use Vitest
+with fetch doubles. Browser E2E uses Playwright route doubles for session,
+roster, export, theme, character, and sync flows; it never requires OAuth,
+Blizzard, or Discord credentials.
+Run `make migrate-check` before adding a migration, then `make migrate` against
+the local database. CI runs formatting, vet, tests, migration checks, contract
+validation, frontend checks, tests, and build.
 
 For troubleshooting sync or API failures, set `LOG_LEVEL=debug` in the backend environment to enable structured sync and request debug logging on stdout.
 

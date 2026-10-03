@@ -107,11 +107,12 @@ func main() {
 		log.Fatal(err)
 	}
 	services := make(map[int64]*appsync.Service, len(allGuilds))
+	metrics := &appsync.Metrics{}
 	var servicesMu sync.RWMutex
 	schedulerStatus := &schedulerHealth{expected: int64(len(allGuilds))}
 	for _, g := range allGuilds {
 		g := g
-		service := &appsync.Service{Engine: appsync.Engine{Client: client, Stores: stores, Log: logg}, Guild: g, Log: logg, Notifier: notify.NewDiscord(g.DiscordWebhookURL, logg)}
+		service := &appsync.Service{Engine: appsync.Engine{Client: client, Stores: stores, Log: logg}, Guild: g, Log: logg, Notifier: notify.NewDiscord(g.DiscordWebhookURL, logg), Metrics: metrics}
 		service.Engine.Progress = service.ReportProgress
 		servicesMu.Lock()
 		services[g.ID] = service
@@ -230,6 +231,10 @@ func main() {
 			},
 		},
 		ShuttingDown: shuttingDown.Load,
+		SyncMetrics: func() map[string]uint64 {
+			s := metrics.Snapshot()
+			return map[string]uint64{"started": s.Started, "completed": s.Completed, "errors": s.Errors, "durationNanos": s.DurationNanos}
+		},
 	})
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

@@ -21,6 +21,7 @@ import (
 	"github.com/brocahontaz/apekeeper/backend/internal/blizzard/dto"
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
+	syncservice "github.com/brocahontaz/apekeeper/backend/internal/sync"
 	"github.com/brocahontaz/apekeeper/backend/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -57,6 +58,70 @@ func TestSPAFallbackDoesNotInterceptAPI(t *testing.T) {
 	h.ServeHTTP(api, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
 	if api.Code != http.StatusOK {
 		t.Fatalf("api=%d", api.Code)
+	}
+}
+
+func TestErrorsHaveStableEnvelopeAndRequestID(t *testing.T) {
+	h := New(API{Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test"))})
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	r.Header.Set("X-Request-ID", "test-request-1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized || w.Header().Get("X-Request-ID") != "test-request-1" {
+		t.Fatalf("status=%d request_id=%q body=%s", w.Code, w.Header().Get("X-Request-ID"), w.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != "unauthenticated" || body["message"] != "unauthenticated" || body["error"] != body["message"] || body["requestId"] != "test-request-1" {
+		t.Fatalf("unexpected error envelope: %#v", body)
+	}
+}
+
+func TestSyncMetricsRequiresAuthentication(t *testing.T) {
+	h := New(API{Auth: auth.New(oauthFake{}, store.UserStore{}, "", []byte("test")), SyncMetrics: func() map[string]uint64 { return map[string]uint64{"started": 4} }})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/diagnostics/sync-metrics", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuthorizedSyncMetricsExposesLifecycleCountersWithoutSensitiveFields(t *testing.T) {
+	ctx := context.Background()
+	p, _ := testdb.New(t)
+	stores := store.New(p)
+	guild, err := stores.Guilds.EnsureGuild(ctx, domain.Guild{Slug: "metrics", Name: "Metrics", Realm: "Area 52", Region: "us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := seedSession(t, ctx, p, stores, "metrics-admin", "admin", guild.ID)
+	m := &syncservice.Metrics{}
+	// These are the counters updated by Service.begin/complete for one run
+	// lifecycle; the endpoint must expose only aggregate observations.
+	m.Started.Add(1)
+	m.Completed.Add(1)
+	m.Errors.Add(0)
+	m.DurationNanos.Add(42)
+	h := New(API{Stores: stores, Auth: auth.New(oauthFake{}, stores.Users, "", []byte("test-secret")), GuildSlug: guild.Slug, SyncMetrics: func() map[string]uint64 {
+		s := m.Snapshot()
+		return map[string]uint64{"started": s.Started, "completed": s.Completed, "errors": s.Errors, "durationNanos": s.DurationNanos}
+	}})
+	w := request(h, http.MethodGet, "/api/diagnostics/sync-metrics", admin)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w).(map[string]any)
+	for key, want := range map[string]float64{"started": 1, "completed": 1, "errors": 0, "durationNanos": 42} {
+		if body[key] != want {
+			t.Fatalf("metrics[%s]=%v, want %v", key, body[key], want)
+		}
+	}
+	for _, secret := range []string{"metrics", "Metrics", "metrics-admin", "Area 52", "guild", "character", "credential", "token"} {
+		if strings.Contains(strings.ToLower(w.Body.String()), strings.ToLower(secret)) {
+			t.Fatalf("sensitive value %q leaked: %s", secret, w.Body.String())
+		}
 	}
 }
 

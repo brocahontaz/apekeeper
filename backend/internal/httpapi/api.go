@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,9 +77,13 @@ type API struct {
 	Security        SecurityLimits
 	ReadinessChecks map[string]func(context.Context) error
 	ShuttingDown    func() bool
+	// SyncMetrics returns aggregate sync counters only; it must not expose
+	// guild, character, upstream, or credential data.
+	SyncMetrics func() map[string]uint64
 }
 type contextKey struct{}
 type guildContextKey struct{}
+type requestIDKey struct{}
 
 const guildCookie = "apekeeper_guild"
 
@@ -89,42 +95,9 @@ func (a API) now() time.Time {
 }
 func New(a API) http.Handler {
 	m := http.NewServeMux()
-	m.HandleFunc("GET /api/auth/login", a.Auth.Login)
-	m.HandleFunc("GET /api/auth/callback", a.Auth.Callback)
-	m.Handle("POST /api/auth/logout", a.requireAuth(http.HandlerFunc(a.Auth.Logout)))
-	m.Handle("GET /api/auth/me", a.requireAuth(http.HandlerFunc(a.me)))
-	m.Handle("GET /api/guilds", a.requireAuth(http.HandlerFunc(a.guilds)))
-	m.Handle("POST /api/guilds/select", a.requireAuth(http.HandlerFunc(a.selectGuild)))
-	m.HandleFunc("GET /healthz", a.health)
-	m.HandleFunc("GET /api/healthz", a.health)
-	m.HandleFunc("GET /readyz", a.readiness)
-	m.HandleFunc("GET /api/readyz", a.readiness)
-	m.Handle("GET /api/dashboard", a.requireGuild(http.HandlerFunc(a.dashboard)))
-	m.Handle("GET /api/roster", a.requireGuild(http.HandlerFunc(a.roster)))
-	m.Handle("GET /api/roster/export", a.requireGuild(http.HandlerFunc(a.rosterExport)))
-	m.Handle("GET /api/characters/{id}", a.requireGuild(http.HandlerFunc(a.character)))
-	m.Handle("GET /api/characters/{id}/history", a.requireGuild(http.HandlerFunc(a.characterHistory)))
-	m.Handle("GET /api/sync/runs",
-		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncRuns)))
-	m.Handle("GET /api/sync/progress",
-		a.requireRole([]string{"superadmin", "admin", "officer"}, http.HandlerFunc(a.syncProgress)))
-	m.Handle("POST /api/sync/run",
-		a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.triggerSync)))
-	m.Handle("POST /api/sync/dry-run", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.dryRun)))
-	m.Handle("POST /api/sync/runs/{id}/retry", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.retrySync)))
-	m.Handle("POST /api/sync/cancel", a.requireRole([]string{"superadmin", "admin"}, http.HandlerFunc(a.cancelSync)))
-	officer := []string{"superadmin", "admin", "officer"}
-	m.Handle("GET /api/officer/queue", a.requireRole(officer, http.HandlerFunc(a.officerQueue)))
-	m.Handle("POST /api/officer/queue/complete", a.requireRole(officer, http.HandlerFunc(a.officerComplete)))
-	m.Handle("POST /api/officer/bulk-tags", a.requireRole(officer, http.HandlerFunc(a.officerBulkTags)))
-	m.Handle("GET /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacterMetadata)))
-	m.Handle("PUT /api/officer/characters/{id}", a.requireRole(officer, http.HandlerFunc(a.officerCharacter)))
-	m.Handle("GET /api/officer/activity", a.requireRole(officer, http.HandlerFunc(a.officerActivity)))
-	m.Handle("GET /api/guild/members", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.members)))
-	m.Handle("GET /api/guild/members/search", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.memberSearch)))
-	m.Handle("POST /api/guild/members", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.inviteMember)))
-	m.Handle("PUT /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.updateMember)))
-	m.Handle("DELETE /api/guild/members/{id}", a.requireRole([]string{"superadmin", "owner", "admin"}, http.HandlerFunc(a.removeMember)))
+	for _, route := range RouteManifest() {
+		route.Register(m, a)
+	}
 	var h http.Handler = m
 	if a.CSRFEnabled {
 		h = csrfCookie(csrf(h))
@@ -152,7 +125,7 @@ func New(a API) http.Handler {
 		}
 		h = limitRequests(a.RateLimit, window, h)
 	}
-	return spa(h, a.Frontend, a.StaticDir)
+	return spa(withRequestID(h), a.Frontend, a.StaticDir)
 }
 func spa(api http.Handler, frontend fs.FS, staticDir string) http.Handler {
 	if frontend == nil {
@@ -190,7 +163,56 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func fail(w http.ResponseWriter, status int, msg string) {
-	jsonOut(w, status, map[string]string{"error": msg})
+	code := "internal_error"
+	switch status {
+	case http.StatusBadRequest:
+		code = "invalid_request"
+	case http.StatusUnauthorized:
+		code = "unauthenticated"
+	case http.StatusForbidden:
+		code = "forbidden"
+	case http.StatusNotFound:
+		code = "not_found"
+	case http.StatusConflict:
+		code = "conflict"
+	case http.StatusTooManyRequests:
+		code = "rate_limited"
+	case http.StatusServiceUnavailable:
+		code = "unavailable"
+	}
+	requestID, _ := w.(interface{ requestID() string })
+	id := ""
+	if requestID != nil {
+		id = requestID.requestID()
+	}
+	// Keep the legacy error field while adding stable, machine-readable fields.
+	body := map[string]string{"code": code, "message": msg, "error": msg}
+	if id != "" {
+		body["requestId"] = id
+	}
+	jsonOut(w, status, body)
+}
+
+type requestIDWriter struct {
+	http.ResponseWriter
+	id string
+}
+
+func (w *requestIDWriter) requestID() string { return w.id }
+func withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if len(id) == 0 || len(id) > 128 || strings.ContainsAny(id, "\r\n") {
+			var b [16]byte
+			if _, err := rand.Read(b[:]); err != nil {
+				id = "unknown"
+			} else {
+				id = hex.EncodeToString(b[:])
+			}
+		}
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(&requestIDWriter{ResponseWriter: w, id: id}, r.WithContext(logger.WithRequestID(r.Context(), id)))
+	})
 }
 func (a API) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1045,6 +1067,16 @@ func (a API) syncProgress(w http.ResponseWriter, r *http.Request) {
 		snap = progress.Progress()
 	}
 	jsonOut(w, 200, snap)
+}
+
+func (a API) syncMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics := map[string]uint64{}
+	if a.SyncMetrics != nil {
+		for key, value := range a.SyncMetrics() {
+			metrics[key] = value
+		}
+	}
+	jsonOut(w, http.StatusOK, metrics)
 }
 func (a API) triggerSync(w http.ResponseWriter, r *http.Request) {
 	g, _ := a.guild(r.Context())

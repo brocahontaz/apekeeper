@@ -12,3 +12,5 @@ not grant access. Migration 0007 bootstraps the existing single guild and
 assigns existing admins as owners.
 
 Each sync records character progression and snapshots for historical comparisons. Snapshot retention is owned by the sync/store layer. Future incremental sync can reuse the existing guild scope and update only changed character records while preserving the same snapshot contract.
+
+The HTTP route table and OpenAPI document are checked in together under `openapi/`; CI compares every registered method/path and its role requirement against the contract. Shared response shape metadata is kept in `contracts/api-contract.json` and is consumed by backend and frontend contract tests. Sync services publish only aggregate counters (`started`, `completed`, `errors`, and duration) at the admin-only diagnostics endpoint; no payloads, names, URLs, or secrets are included.

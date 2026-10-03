@@ -44,7 +44,7 @@ func (s SyncRunStore) ByID(ctx context.Context, guildID, id int64) (SyncRun, err
 	return r, e
 }
 func (s SyncRunStore) History(ctx context.Context, guildID int64, limit int) ([]SyncRun, error) {
-	rows, e := s.pool.Query(ctx, `SELECT id,guild_id,started_at,finished_at,trigger,status,COALESCE(characters_total,0),COALESCE(characters_updated,0),COALESCE(characters_failed,0),COALESCE(error_summary,''),COALESCE(detail,'{}'),notify_status FROM sync_runs WHERE guild_id=$1 ORDER BY started_at DESC LIMIT $2`, guildID, limit)
+	rows, e := s.pool.Query(ctx, SyncHistoryQuery, guildID, limit)
 	if e != nil {
 		return nil, e
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brocahontaz/apekeeper/backend/internal/domain"
+	"github.com/brocahontaz/apekeeper/backend/internal/logger"
 	"github.com/brocahontaz/apekeeper/backend/internal/notify"
 	"github.com/brocahontaz/apekeeper/backend/internal/store"
 )
@@ -29,17 +30,19 @@ type Service struct {
 	Log *slog.Logger
 	// Notifier is optional; when nil no external notifications are sent.
 	Notifier Notifier
+	Metrics  *Metrics
 	mu       sync.Mutex
 	running  bool
 	started  time.Time
 	last     store.SyncRun
 	// progress is the live in-memory snapshot reported to the API; updates
 	// are never persisted, Finish records the final outcome in the store.
-	progress domain.Progress
-	cancel   context.CancelFunc
-	done     chan struct{}
-	notifyWG sync.WaitGroup
-	stopping bool
+	progress      domain.Progress
+	cancel        context.CancelFunc
+	done          chan struct{}
+	notifyWG      sync.WaitGroup
+	stopping      bool
+	correlationID string
 }
 
 func (s *Service) Start(ctx context.Context, trigger string) (store.SyncRun, error) {
@@ -122,6 +125,7 @@ func (s *Service) begin(createCtx, runParent context.Context, trigger string) (s
 		runCtx, s.cancel = context.WithCancel(runParent)
 		s.done = make(chan struct{})
 		s.started = time.Now()
+		s.correlationID = logger.RequestID(createCtx)
 		s.progress = domain.Progress{
 			Active:    true,
 			RunID:     r.ID,
@@ -132,7 +136,10 @@ func (s *Service) begin(createCtx, runParent context.Context, trigger string) (s
 	}
 	s.mu.Unlock()
 	if e == nil && s.Log != nil {
-		s.Log.Info("sync run started", "runId", r.ID, "guild", s.Guild.Slug, "trigger", trigger)
+		s.Log.Info("sync run started", "request_id", logger.RequestID(createCtx), "runId", r.ID, "guild", s.Guild.Slug, "trigger", trigger)
+	}
+	if e == nil && s.Metrics != nil {
+		s.Metrics.Started.Add(1)
 	}
 	return r, runCtx, e
 }
@@ -172,6 +179,7 @@ func (s *Service) complete(r store.SyncRun) {
 		s.notifyWG.Add(1)
 	}
 	started := s.started
+	correlationID := s.correlationID
 	// The terminal snapshot keeps the run's final counts visible; the next
 	// begin overwrites it.
 	s.progress.Active = false
@@ -188,6 +196,7 @@ func (s *Service) complete(r store.SyncRun) {
 	// asynchronous paths.
 	if s.Log != nil {
 		s.Log.Info("sync run completed",
+			"request_id", correlationID,
 			"runId", r.ID,
 			"status", string(r.Status),
 			"total", r.Total,
@@ -195,6 +204,13 @@ func (s *Service) complete(r store.SyncRun) {
 			"failed", r.Failed,
 			"duration", time.Since(started).String(),
 		)
+	}
+	if s.Metrics != nil {
+		s.Metrics.Completed.Add(1)
+		if r.Failed > 0 || r.Status == domain.RunFailed {
+			s.Metrics.Errors.Add(1)
+		}
+		s.Metrics.DurationNanos.Add(uint64(time.Since(started)))
 	}
 	// The notification fans out after the run is settled and must neither
 	// delay nor affect its outcome; delivery errors stay inside the notifier.

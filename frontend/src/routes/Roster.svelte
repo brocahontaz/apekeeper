@@ -112,6 +112,18 @@
     role = "";
     changeFilter();
   }
+  async function downloadExport(event: MouseEvent) {
+    event.preventDefault();
+    const response = await fetch((event.currentTarget as HTMLAnchorElement).href, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) return;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = "roster.csv";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
   onMount(() => {
     load();
     const restore = () => {
@@ -242,7 +254,8 @@
   <a
     class="export"
     href={`/api/roster/export?${rosterExportQuery({ ...filters(), sort, direction })}`}
-    download>Export CSV</a
+    download
+    onclick={downloadExport}>Export CSV</a
   >
 </div>
 {#if error}<section class="error-state" role="alert" aria-live="assertive">
